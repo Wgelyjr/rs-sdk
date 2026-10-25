@@ -914,8 +914,15 @@ class InfoOverlaysPlugin {
             action === MiniMenuAction.OP_NPC5 ||
             action === MiniMenuAction.TGT_NPC
         ) {
-            this.myTargetIndex = client.menuParamA[option];
-            this.myTargetUntil = this.ctx.loopCycle() + TARGET_WINDOW_CYCLES;
+            // Talk-to/Bank/Pickpocket are all NPC menu ops too — without this
+            // gate, clicking a banker sets myTargetIndex and the opponent strip
+            // paints a "Banker" nameplate for TARGET_WINDOW_CYCLES. Only
+            // attackable NPCs (vislevel > 0 or an Attack op) are opponents.
+            const npc: any = client.npc[client.menuParamA[option]];
+            if (this.isAttackable(npc)) {
+                this.myTargetIndex = client.menuParamA[option];
+                this.myTargetUntil = this.ctx.loopCycle() + TARGET_WINDOW_CYCLES;
+            }
         }
     }
 }
