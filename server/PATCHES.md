@@ -347,6 +347,13 @@ Upgrade hazards:
 - [ ] **XP table** — `Client.ts` `levelExperience`: same `level/10.0` curve but **NO ×10**
       (client receives real xp; engine stores fine xp). Verify both formulas side-by-side after
       any sync touching `Player.ts` or `Client.ts`.
+- [ ] **`projectTileToScreen` arg order (289 fix)** — must call
+      `getOverlayPos(sceneX, sceneZ, 0)`; the rev-274-style `(x, y, z)` order fed the terrain
+      height into the `(x, z, height)` bounds check and returned null for EVERY tile (bot
+      click markers via `ActionExecutor` and the qol `projectTile`/`pickTile` helpers depend
+      on it; `projectNpcToScreen`/`projectPlayerToScreen` go through `getOverlayPosEntity`
+      and were unaffected).
+      Verify: `grep -n "getOverlayPos(sceneX, sceneZ, 0)" src/client/Client.ts`
 - [ ] **AFK logout extended** to 10 minutes (upstream 90s logs idle bots out).
 - [ ] **Renamed-field adaptations** (274): `chatModalId`, `redrawChat`, `sideIcon`,
       `activeIcon`, `redrawSide`, `redrawIcons`, static `Client.loopCycle` — the bot bridge
@@ -384,8 +391,16 @@ Upgrade hazards:
         suppressed; vanilla comparisons are all `=== 1/2` so 3 is inert); `onqolwheel`
         listener registered in `run()`, nulled in `shutdown()`; `onqolresize` dispatch at
         the end of `resize()`; `onqolframepace` sleep after `mainredraw()` (tfps logic kept).
+      - `GameShell.ts` **F9 frame pacing** (qol Display plugin): `setQolFramePace(targetHz,
+        logicPeriodMs?)` + `qolTrackLogicStep()` measure the loop's real `mainloop()` step
+        interval; with a cap set, the run loop takes an unlocked branch that paces
+        `mainredraw()` to the cap while a wall-clock accumulator dispenses `mainloop()` at
+        the measured interval (≤8 catch-up steps/frame, 1 s debt clamp) — game speed must
+        stay cap-invariant. `qolFrameTargetHz = 0` (the default '50 (default)' setting)
+        keeps the vanilla accumulator path byte-identical.
       Verify: `grep -cn "qol:" src/client/Client.ts src/client/GameShell.ts` — expect 27
-      (Client) / 16 (GameShell) tagged lines, each hunk present; then
+      (Client, plus one `qol-fix:` in `projectTileToScreen`) / 28 (GameShell) tagged lines,
+      each hunk present; then
       `bunx tsc --noEmit -p server/webclient/tsconfig.json` and a bot regression
       (`bun test src/bot`) — the qol surface must stay invisible to the bot build
       (menuBuilt suppression + no member renames).

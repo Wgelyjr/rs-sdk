@@ -2355,8 +2355,10 @@ export class Client extends GameShell {
 
         if (sceneX < 128 || sceneZ < 128 || sceneX > 13056 || sceneZ > 13056) return null;
 
-        const y = this.getAvH(sceneX, sceneZ, this.minusedlevel);
-        this.getOverlayPos(sceneX, y, sceneZ);
+        // qol-fix: rev-289 getOverlayPos signature is (x, z, height) with height as an
+        // offset above the terrain; the old rev-274-style (x, y, z) call order fed the
+        // terrain height into the z bounds check and returned null for every tile.
+        this.getOverlayPos(sceneX, sceneZ, 0);
 
         if (this.projectX > -1) {
             return { x: this.projectX, y: this.projectY };

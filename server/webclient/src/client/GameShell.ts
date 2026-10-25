@@ -58,6 +58,22 @@ export default abstract class GameShell {
     public onqolresize: ((width: number, height: number) => void) | null = null;
     public onqolframepace: ((nowMs: number) => number | null) | null = null;
 
+    // qol: F9 frame-pacing state, driven by setQolFramePace() (visual.fpsCap).
+    // qolFrameTargetHz: 0 = vanilla accumulator pacing (untouched loop); > 0 =
+    // outer iterations (mainredraw) paced to that rate; Infinity ('Unlimited')
+    // floors the pacing sleep at mindel. qolLogicPeriodMs is the loop's own
+    // measured mainloop() step interval (wall-clock averaged, see
+    // qolTrackLogicStep) — the unlocked branch dispenses logic steps at exactly
+    // that interval so the game speed never changes with the cap.
+    public qolFrameTargetHz: number = 0;
+    private qolLogicPeriodMs: number = 0;
+    private qolLogicAnchor: number = 0;
+    private qolLogicAcc: number = 0;
+    private qolLastWorkMs: number = 0;
+    private qolIterEnd: number = 0;
+    private qolWindowStart: number = 0;
+    private qolWindowTicks: number = 0;
+
     /// custom
     protected resizeToFit: boolean = false;
     protected tfps: number = 50;
@@ -196,39 +212,102 @@ export default abstract class GameShell {
                 delta = (this.deltime - (ntime - otim) / 10) | 0;
             }
 
-            this.otim[opos] = ntime;
-            opos = (opos + 1) % 10;
+            // qol: F9 — unlocked frame pacing (visual.fpsCap, see setQolFramePace). The
+            // window math above still runs in both branches so the fps/debug overlay
+            // keeps working; with a cap set, this branch owns the pacing and the logic
+            // accumulator: mainredraw() lands on the cap while mainloop() keeps its
+            // measured rate.
+            const qolUnlocked: boolean = this.qolFrameTargetHz > 0;
 
-            if (delta > 1) {
-                for (let i: number = 0; i < 10; i++) {
-                    if (this.otim[i] !== 0) {
-                        this.otim[i] += delta;
+            if (qolUnlocked) {
+                // qol: the count accumulator is bypassed; clamp ratio so a switch back
+                // to vanilla pacing resumes at full rate from a healthy window.
+                ratio = 256;
+
+                // qol: stamp the window with the previous frame's end instead of ntime
+                // — the sleep below is wall-clock paced, so there is no `delta` for
+                // the `otim += delta` compensation shift to model.
+                this.otim[opos] = this.qolIterEnd > 0 ? this.qolIterEnd : ntime;
+                opos = (opos + 1) % 10;
+
+                // qol: sleep off the previous frame's measured cost so the
+                // iteration-to-iteration period lands on the target. 'Unlimited'
+                // (Infinity) makes the target 0 ms and floors at mindel: uncapped,
+                // yet still yielding to DOM/network work.
+                let qolSleep: number = 1000 / this.qolFrameTargetHz - this.qolLastWorkMs;
+                if (qolSleep < this.mindel) {
+                    qolSleep = this.mindel;
+                }
+                await sleep(qolSleep);
+
+                // qol: explicit wall-clock logic accumulator — every millisecond of
+                // real time (sleep, redraw, stalls) buys logic at the measured classic
+                // interval, so the logic Hz is cap-invariant. The 8-step bound mirrors
+                // the original loop's catch-up burst on a slow frame.
+                const qolNow: number = performance.now();
+                if (this.qolLogicAnchor > 0) {
+                    const qolElapsed: number = qolNow - this.qolLogicAnchor;
+                    this.qolLogicAcc += qolElapsed > 1000 ? 1000 : qolElapsed;
+                }
+                this.qolLogicAnchor = qolNow;
+
+                const qolPeriod: number = this.qolLogicPeriodMs > 0 ? this.qolLogicPeriodMs : this.deltime;
+                let qolSteps: number = 0;
+                while (qolSteps < 8 && this.qolLogicAcc >= qolPeriod) {
+                    this.qolLogicAcc -= qolPeriod;
+                    qolSteps++;
+
+                    this.mouseClickButton = this.nextMouseClickButton;
+                    this.mouseClickX = this.nextMouseClickX;
+                    this.mouseClickY = this.nextMouseClickY;
+                    this.mouseClickTime = this.nextMouseClickTime;
+                    this.nextMouseClickButton = 0;
+
+                    await this.mainloop();
+
+                    this.qolTrackLogicStep(); // qol: F9
+                    this.keyQueueReadPos = this.keyQueueWritePos;
+                }
+            } else {
+                this.otim[opos] = ntime;
+                opos = (opos + 1) % 10;
+
+                if (delta > 1) {
+                    for (let i: number = 0; i < 10; i++) {
+                        if (this.otim[i] !== 0) {
+                            this.otim[i] += delta;
+                        }
                     }
                 }
+
+                if (delta < this.mindel) {
+                    delta = this.mindel;
+                }
+
+                await sleep(delta);
+
+                while (count < 256) {
+                    this.mouseClickButton = this.nextMouseClickButton;
+                    this.mouseClickX = this.nextMouseClickX;
+                    this.mouseClickY = this.nextMouseClickY;
+                    this.mouseClickTime = this.nextMouseClickTime;
+                    this.nextMouseClickButton = 0;
+
+                    await this.mainloop();
+
+                    this.qolTrackLogicStep(); // qol: F9 — keeps the unlock seed measured
+                    this.keyQueueReadPos = this.keyQueueWritePos;
+                    count += ratio;
+                }
+                count &= 0xff;
             }
-
-            if (delta < this.mindel) {
-                delta = this.mindel;
-            }
-
-            await sleep(delta);
-
-            while (count < 256) {
-                this.mouseClickButton = this.nextMouseClickButton;
-                this.mouseClickX = this.nextMouseClickX;
-                this.mouseClickY = this.nextMouseClickY;
-                this.mouseClickTime = this.nextMouseClickTime;
-                this.nextMouseClickButton = 0;
-
-                await this.mainloop();
-
-                this.keyQueueReadPos = this.keyQueueWritePos;
-                count += ratio;
-            }
-            count &= 0xff;
 
             if (this.deltime > 0) {
-                this.fps = ((ratio * 1000) / (this.deltime * 256)) | 0;
+                // qol: F9 — with a cap set `ratio` is clamped and no longer tracks the
+                // iteration rate; report the real frame rate from the same 10-sample
+                // otim window (10 iterations per window → 10000/elapsed ms → Hz).
+                const qolWindow: number = otim > 0 ? ntime - otim : 0;
+                this.fps = qolUnlocked && qolWindow > 0 ? ((10000 / qolWindow) | 0) : ((ratio * 1000) / (this.deltime * 256)) | 0;
             }
 
             await this.mainredraw();
@@ -249,6 +328,15 @@ export default abstract class GameShell {
                 }
             }
 
+            // qol: F9 — frame-end stamp: next iteration's window entry and work-time
+            // estimate. Taken here (after the framePace and tfps sleeps) so both the
+            // pacing math and the reported fps reflect the FULL iteration period.
+            if (this.qolFrameTargetHz > 0) {
+                const qolEnd: number = performance.now();
+                this.qolIterEnd = qolEnd;
+                this.qolLastWorkMs = qolEnd - ntime;
+            }
+
             if (this.debug) {
                 console.log('ntime:' + ntime);
                 for (let i = 0; i < 10; i++) {
@@ -264,6 +352,67 @@ export default abstract class GameShell {
 
         if (this.state === -1) {
             this.shutdown();
+        }
+    }
+
+    /**
+     * qol: F9 — select frame pacing (visual.fpsCap). `targetHz` 0 restores the
+     * vanilla accumulator pacing (the '50 (default)' setting — the loop stays
+     * exactly as upstream); a finite rate paces the outer iteration (and thus
+     * mainredraw()) to it; Infinity ('Unlimited') floors the pacing sleep at
+     * mindel. Game logic never changes speed: the wall-clock accumulator in the
+     * unlocked branch dispenses mainloop() steps at `logicPeriodMs` when given,
+     * otherwise at the loop's own measured mainloop() interval (deltime before
+     * the first measurement completes). Called by the qol Display plugin.
+     */
+    public setQolFramePace(targetHz: number, logicPeriodMs: number = 0): void {
+        const next: number = targetHz > 0 && (Number.isFinite(targetHz) || targetHz === Number.POSITIVE_INFINITY) ? targetHz : 0;
+        if (next === this.qolFrameTargetHz && !(next > 0 && logicPeriodMs >= 1)) {
+            return;
+        }
+
+        const modeChanged: boolean = (next > 0) !== (this.qolFrameTargetHz > 0);
+        this.qolFrameTargetHz = next;
+
+        if (logicPeriodMs >= 1 && logicPeriodMs <= 1000) {
+            this.qolLogicPeriodMs = logicPeriodMs;
+        }
+
+        if (modeChanged) {
+            this.qolLogicAnchor = 0;
+            this.qolLogicAcc = 0;
+            this.qolIterEnd = 0;
+            this.qolLastWorkMs = 0;
+            if (next > 0 && this.qolLogicPeriodMs <= 0) {
+                this.qolLogicPeriodMs = this.deltime > 0 ? this.deltime : 14;
+            }
+        }
+    }
+
+    /**
+     * qol: F9 — call once per mainloop() step from either branch. Keeps a
+     * wall-clock-averaged step interval over windows of 128 measured intervals —
+     * the true logic period of this machine in its current state, which is what
+     * the unlocked branch reproduces when a cap is enabled. Cheap by design:
+     * one counter plus one performance.now() per window, and a full no-op for
+     * shells without the qol layer wired (MapView etc.).
+     */
+    private qolTrackLogicStep(): void {
+        if (this.onqolframepace === null) {
+            return;
+        }
+
+        const now: number = performance.now();
+        if (this.qolWindowStart === 0) {
+            this.qolWindowStart = now;
+            this.qolWindowTicks = 0;
+        } else if (++this.qolWindowTicks >= 128) {
+            const period: number = (now - this.qolWindowStart) / this.qolWindowTicks;
+            if (period >= 2 && period <= 60) {
+                this.qolLogicPeriodMs = period;
+            }
+            this.qolWindowStart = 0;
+            this.qolWindowTicks = 0;
         }
     }
 
