@@ -12,6 +12,7 @@ import ObjType from '#/config/ObjType.js';
 import { BuildArea } from '#/dash3d/CollisionMap.js';
 
 import type { QolMenuView } from '#/client/qol/QolHooks.js';
+import type { QolDom } from '#/client/qol/QolDom.js';
 import type QolConfig from '#/client/qol/QolConfig.js';
 import type QolGraphics from '#/client/qol/QolGraphics.js';
 import type QolHooks from '#/client/qol/QolHooks.js';
@@ -75,6 +76,14 @@ export class QolContext {
     isBotBuild(): boolean {
         // Must mirror Client.ts's ENABLE_BOT_SDK: bundle.ts defines the literal.
         return process.env.ENABLE_BOT_SDK === 'true';
+    }
+
+    /** DOM overlay layer (orbs on the frame, dockable panels); null pre-init. */
+    dom: QolDom | null = null;
+
+    /** True when tracker/timers/orbs should live in DOM docks, not the viewport. */
+    domDocks(): boolean {
+        return this.dom !== null && this.config.getBool('overlay.domDocks');
     }
 
     /** True while the game session is live (as opposed to the title screen). */

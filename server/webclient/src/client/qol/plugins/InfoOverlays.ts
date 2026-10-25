@@ -29,6 +29,7 @@ import Skill from '#/client/Skill.js';
 import { MiniMenuAction } from '#/client/MiniMenuAction.js';
 
 import type { QolContext } from '#/client/qol/QolContext.js';
+import type { QolDomWidget } from '#/client/qol/QolDom.js';
 import type { QolClickEvent } from '#/client/qol/QolHooks.js';
 import type QolGraphics from '#/client/qol/QolGraphics.js';
 
@@ -123,6 +124,15 @@ class InfoOverlaysPlugin {
     // ---- F14 orb layout ----
     /** Reused layout rect, viewport-local (scene buffer) coordinates. */
     private readonly orbRect = { x: 0, y: 0, w: 0, h: 0, canvas: false };
+
+    // ---- DOM docks ----
+    private orbWidget: QolDomWidget | null = null;
+    private timerWidget: QolDomWidget | null = null;
+    private orbFillEls: (HTMLDivElement | null)[] = [null, null];
+    private orbNumEls: (HTMLDivElement | null)[] = [null, null];
+    private lastOrbHp: number = -1;
+    private lastOrbPr: number = -1;
+    private nextDomMs: number = 0;
 
     private ctx!: QolContext;
 
@@ -270,6 +280,7 @@ class InfoOverlaysPlugin {
                 this.resetTimers();
             }
             this.wasIngame = false;
+            this.updateDom(this.ctx.nowMs());
             return;
         }
         if (!this.wasIngame) {
@@ -310,6 +321,8 @@ class InfoOverlaysPlugin {
             this.lastDirection[s] = delta > 0 ? 1 : -1;
             this.lastChangeMs[s] = now;
         }
+
+        this.updateDom(now);
     }
 
     private seedLevels(): void {
@@ -390,7 +403,9 @@ class InfoOverlaysPlugin {
                 const f = fonts.p11;
                 if (f) {
                     const frac: number = Math.min(Math.max(hp, 0), total);
-                    g.centreText(f, frac + '/' + total, px, py - 12, COL_WHITE);
+                    // Right of the bar: above/below placements collide with
+                    // hitsplats and with bars of NPCs stacked behind this one.
+                    g.text(f, frac + '/' + total, px + 18, py + 2, COL_WHITE);
                 }
             }
         }
@@ -403,8 +418,10 @@ class InfoOverlaysPlugin {
             return;
         }
         this.drawOpponentStrip(g);
-        this.drawStatTimers(g);
-        this.drawOrbs(g);
+        if (!this.ctx.domDocks()) {
+            this.drawStatTimers(g);
+            this.drawOrbs(g);
+        }
     }
 
     /**
@@ -454,7 +471,7 @@ class InfoOverlaysPlugin {
         const cx: number = 256; // viewport-local (512-wide scene buffer)
         const top: number = 4;
         const w: number = 150;
-        const h: number = 34;
+        const h: number = 44; // name row + bar row + numbers row, no overlaps
         g.fillRectTrans(cx - w / 2, top, w, h, COL_PANEL, 216);
         g.drawRectTrans(cx - w / 2, top, w, h, COL_BORDER, 230);
 
@@ -464,16 +481,18 @@ class InfoOverlaysPlugin {
         if (known) {
             const ratio: number = Math.min(Math.max(hp / total, 0), 1);
             const barW: number = (ratio * 100) | 0;
-            const barY: number = top + 24;
+            const barY: number = top + 18;
             g.fillRect(cx - 50, barY, barW, 5, COL_GREEN);
             g.fillRect(cx - 50 + barW, barY, 100 - barW, 5, COL_RED);
             if (fonts.p11) {
                 const pct: number = Math.round(ratio * 100);
-                g.text(fonts.p11, hp + '/' + total, cx - 48, barY + 5, COL_WHITE);
-                g.centreText(fonts.p11, pct + '%', cx + 28, barY + 5, pct > 50 ? COL_GREEN : pct > 20 ? COL_WARN : COL_RED);
+                // Numbers BELOW the bar — never on top of it.
+                g.text(fonts.p11, hp + '/' + total, cx - 50, barY + 16, COL_WHITE);
+                const pctText: string = pct + '%';
+                g.text(fonts.p11, pctText, cx + 50 - g.textWidth(fonts.p11, pctText), barY + 16, pct > 50 ? COL_GREEN : pct > 20 ? COL_WARN : COL_RED);
             }
         } else if (fonts.p11) {
-            g.centreText(fonts.p11, 'HP unknown until damaged', cx, top + 29, COL_GREY);
+            g.centreText(fonts.p11, 'HP unknown until damaged', cx, top + 32, COL_GREY);
         }
     }
 
@@ -481,13 +500,10 @@ class InfoOverlaysPlugin {
      * F12 timer rows: one per skill whose effective level differs from base —
      * `Name cur/base (+d/-d) Ns`, blinking red inside the last 5 seconds.
      */
-    private drawStatTimers(g: QolGraphics): void {
-        if (!this.statTimersOn) {
-            return;
-        }
+    /** Fill this.rows/this.rowCount from live stat state; returns rowCount. */
+    private computeTimerRows(): number {
         const ctx = this.ctx;
         const now: number = ctx.nowMs();
-
         this.rowCount = 0;
         for (let s: number = 0; s < Skill.count; s++) {
             if (!Skill.used[s] || this.lastChangeMs[s] === 0) {
@@ -507,38 +523,162 @@ class InfoOverlaysPlugin {
             row.remainingMs = remaining;
             this.rowCount++;
         }
-        if (this.rowCount === 0) {
+        return this.rowCount;
+    }
+
+    /** `Name cur/base (+d/-d) Ns` for a computed row. */
+    private timerText(i: number): string {
+        const ctx = this.ctx;
+        const row = this.rows[i];
+        const s: number = row.skill;
+        const level: number = ctx.statLevel(s);
+        const base: number = ctx.statBase(s);
+        const delta: number = level - base;
+        return this.label(s) + ' ' + level + '/' + base + ' (' + (delta > 0 ? '+' + delta : delta) + ') ' + Math.ceil(row.remainingMs / 1000) + 's';
+    }
+
+    private drawStatTimers(g: QolGraphics): void {
+        if (!this.statTimersOn) {
             return;
         }
-
-        const fonts = ctx.fonts();
+        if (this.computeTimerRows() === 0) {
+            return;
+        }
+        const fonts = this.ctx.fonts();
         const f = fonts.p11;
         if (!f) {
             return;
         }
-        const rowH: number = 12;
-        const margin: number = 4;
-        const right: number = 512 - margin;
-        const bottom: number = 334 - margin;
-        const blinkHide: boolean = ((now / 300) | 0) % 2 === 1;
 
+        // Backed panel: without it the rows collide with the vanilla menu-hint
+        // text ("Walk here") that also lives at the viewport top-left.
+        const rowH: number = 12;
+        const pad: number = 4;
+        let maxW: number = 0;
+        for (let i: number = 0; i < this.rowCount; i++) {
+            const w: number = g.textWidth(f, this.timerText(i));
+            if (w > maxW) {
+                maxW = w;
+            }
+        }
+        const panelW: number = maxW + pad * 2;
+        const panelH: number = this.rowCount * rowH + pad * 2 - 3;
+        const margin: number = 4;
+        const px0: number = this.statTimerPos === 1 || this.statTimerPos === 3 ? 512 - margin - panelW : margin;
+        const py0: number = this.statTimerPos >= 2 ? 334 - margin - panelH : margin;
+        g.fillRectTrans(px0, py0, panelW, panelH, COL_PANEL, 216);
+        g.drawRectTrans(px0, py0, panelW, panelH, COL_BORDER, 230);
+
+        const now: number = this.ctx.nowMs();
+        const blinkHide: boolean = ((now / 300) | 0) % 2 === 1;
         for (let i: number = 0; i < this.rowCount; i++) {
             const row = this.rows[i];
-            const urgent: boolean = row.remainingMs <= 5_000;
-            if (urgent && blinkHide) {
+            if (row.remainingMs <= 5_000 && blinkHide) {
                 continue;
             }
-            const s: number = row.skill;
-            const level: number = ctx.statLevel(s);
-            const base: number = ctx.statBase(s);
-            const delta: number = level - base;
-            const label = this.label(s);
-            const text: string = label + ' ' + level + '/' + base + ' (' + (delta > 0 ? '+' + delta : delta) + ') ' + Math.ceil(row.remainingMs / 1000) + 's';
+            const level: number = this.ctx.statLevel(row.skill);
+            const base: number = this.ctx.statBase(row.skill);
+            g.text(f, this.timerText(i), px0 + pad, py0 + pad + i * rowH + 8, row.remainingMs <= 5_000 ? COL_RED : level > base ? COL_GREEN : COL_WARN);
+        }
+    }
 
-            const x: number = this.statTimerPos === 1 || this.statTimerPos === 3 ? right - g.textWidth(f, text) : margin;
-            const y: number =
-                this.statTimerPos >= 2 ? bottom - (this.rowCount - 1 - i) * rowH - f.height : margin + i * rowH + f.height;
-            g.text(f, text, x, y, urgent ? COL_RED : level > base ? COL_GREEN : COL_WARN);
+    // ---- DOM docks (orbs on the frame beside the minimap; timers panel
+    //      floating beside the client when the window is wide enough) ----
+
+    private ensureDom(): void {
+        const dom = this.ctx.dom;
+        if (dom === null) {
+            return;
+        }
+        if (this.orbWidget === null) {
+            this.orbWidget = dom.create(
+                '<div class="qol-orbwrap">' +
+                    '<div class="qol-orb" data-tab="0"><div class="fill" style="background:#cc2020"></div><div class="num"></div></div>' +
+                    '<div class="qol-orb" data-tab="5"><div class="fill" style="background:#d8e6ff"></div><div class="num"></div></div>' +
+                    '</div>',
+                519, 118, false);
+            if (this.orbWidget !== null) {
+                const fills = this.orbWidget.el.querySelectorAll('.fill');
+                const nums = this.orbWidget.el.querySelectorAll('.num');
+                this.orbFillEls = [fills[0] as HTMLDivElement, fills[1] as HTMLDivElement];
+                this.orbNumEls = [nums[0] as HTMLDivElement, nums[1] as HTMLDivElement];
+                this.orbWidget.el.addEventListener('click', (ev: MouseEvent): void => {
+                    const target = ev.target as HTMLElement | null;
+                    const orb = target !== null ? target.closest('.qol-orb') : null;
+                    const tab = orb !== null ? parseInt(orb.getAttribute('data-tab') ?? '0', 10) : -1;
+                    if (tab === 0 || tab === 5) {
+                        this.ctx.client.setTab(tab);
+                    }
+                });
+            }
+        }
+        if (this.timerWidget === null) {
+            const anchor = this.timerAnchor();
+            this.timerWidget = dom.create('<div class="qol-panel"></div>', anchor.x, anchor.y, true);
+        }
+    }
+
+    /** Fallback buffer-space anchor for the timers panel when docking outside doesn't fit. */
+    private timerAnchor(): { x: number; y: number } {
+        if (this.statTimerPos === 1) return { x: 340, y: 5 };
+        if (this.statTimerPos === 2) return { x: 5, y: 290 };
+        if (this.statTimerPos === 3) return { x: 340, y: 290 };
+        return { x: 5, y: 20 };
+    }
+
+    /** Refresh DOM widgets (tick cadence, internally throttled). */
+    private updateDom(now: number): void {
+        const ctx = this.ctx;
+        const dom = ctx.dom;
+        if (dom === null) {
+            return;
+        }
+        if (!ctx.domDocks()) {
+            if (this.orbWidget !== null) dom.show(this.orbWidget, false);
+            if (this.timerWidget !== null) dom.show(this.timerWidget, false);
+            return;
+        }
+        this.ensureDom();
+
+        if (this.orbWidget !== null) {
+            const on = this.orbMode !== ORB_OFF && ctx.ingame();
+            dom.show(this.orbWidget, on);
+            if (on) {
+                const hp: number = ctx.statLevel(3);
+                const hpBase: number = ctx.statBase(3);
+                const pr: number = ctx.statLevel(5);
+                const prBase: number = ctx.statBase(5);
+                if (hp !== this.lastOrbHp && this.orbFillEls[0] !== null && this.orbNumEls[0] !== null) {
+                    this.lastOrbHp = hp;
+                    this.orbFillEls[0].style.height = Math.round(Math.min(Math.max(hpBase > 0 ? hp / hpBase : 0, 0), 1) * 100) + '%';
+                    this.orbNumEls[0].textContent = String(hp);
+                }
+                if (pr !== this.lastOrbPr && this.orbFillEls[1] !== null && this.orbNumEls[1] !== null) {
+                    this.lastOrbPr = pr;
+                    this.orbFillEls[1].style.height = Math.round(Math.min(Math.max(prBase > 0 ? pr / prBase : 0, 0), 1) * 100) + '%';
+                    this.orbNumEls[1].textContent = String(pr);
+                }
+            }
+        }
+
+        if (this.timerWidget !== null) {
+            const on = this.statTimersOn && ctx.ingame() && this.computeTimerRows() > 0;
+            dom.show(this.timerWidget, on);
+            if (on && now >= this.nextDomMs) {
+                this.nextDomMs = now + 250;
+                let html = '<div class="qol-h"><span>Stat timers</span></div>';
+                for (let i = 0; i < this.rowCount; i++) {
+                    const row = this.rows[i];
+                    const level: number = ctx.statLevel(row.skill);
+                    const base: number = ctx.statBase(row.skill);
+                    const delta: number = level - base;
+                    const cls: string = row.remainingMs <= 5_000 ? 'qol-red' : delta > 0 ? 'qol-grn' : 'qol-yel';
+                    html += '<div class="qol-row"><span>' + this.label(row.skill) + ' ' + level + '/' + base +
+                        ' <span class="' + cls + '">(' + (delta > 0 ? '+' + delta : delta) + ')</span></span>' +
+                        '<span class="' + cls + '">' + Math.ceil(row.remainingMs / 1000) + 's</span></div>';
+                }
+                this.timerWidget.el.innerHTML = '<div class="qol-panel">' + html + '</div>';
+            }
         }
     }
 
@@ -703,7 +843,7 @@ class InfoOverlaysPlugin {
             return false;
         }
 
-        if (this.orbMode !== ORB_OFF) {
+        if (this.orbMode !== ORB_OFF && !this.ctx.domDocks()) {
             const rect = this.layoutOrbs();
             const px: number = e.x - 4; // scene buffer sits at (4,4)
             const py: number = e.y - 4;

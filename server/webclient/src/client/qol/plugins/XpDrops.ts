@@ -19,6 +19,7 @@
 // drops/tracker entries require oldXp > 0 && newXp > oldXp.
 
 import type { QolContext } from '#/client/qol/QolContext.js';
+import type { QolDomWidget } from '#/client/qol/QolDom.js';
 import type { QolGraphics } from '#/client/qol/QolGraphics.js';
 import type { QolClickEvent, QolXpGainEvent } from '#/client/qol/QolHooks.js';
 import type PixFont from '#/graphics/PixFont.js';
@@ -56,9 +57,9 @@ const RATE_WINDOW_MS: number = 5 * 60 * 1000;
 const RATE_MIN_SPAN_MS: number = 30 * 1000;
 
 /** Tracker geometry (p11 rows). */
-const TRACKER_W: number = 152;
-const TRACKER_HEADER_H: number = 15;
-const TRACKER_ROW_H: number = 23; // two text lines per skill
+const TRACKER_W: number = 172;
+const TRACKER_HEADER_H: number = 16;
+const TRACKER_ROW_H: number = 24; // two text lines per skill
 const TRACKER_MAX_ROWS: number = 8;
 const TRACKER_MARGIN: number = 6;
 
@@ -163,6 +164,9 @@ class XpDropsPlugin {
     private rows: SkillSession[] = [];
     /** Per-row derived strings, refreshed with the rows (avoids draw-loop allocs). */
     private readonly rowText: Array<{ name: string; gain: string; rate: string; act: string; ttl: string }> = [];
+
+    // ---- DOM dock ----
+    private trackerWidget: QolDomWidget | null = null;
 
     constructor(ctx: QolContext) {
         this.ctx = ctx;
@@ -342,6 +346,7 @@ class XpDropsPlugin {
                 this.resetSession();
             }
             this.wasIngame = false;
+            this.updateTrackerDom();
             return;
         }
         if (!this.wasIngame) {
@@ -426,6 +431,60 @@ class XpDropsPlugin {
                 out.ttl = xpPerHour > 0 ? formatDuration((toNext / xpPerHour) * 3600000) : '--';
             }
         }
+
+        this.updateTrackerDom();
+    }
+
+    /** Mirror the tracker into a DOM dock (beside the client when it fits). */
+    private updateTrackerDom(): void {
+        const ctx = this.ctx;
+        const dom = ctx.dom;
+        if (dom === null) {
+            return;
+        }
+        if (!ctx.domDocks() || !this.trackerOn || this.rows.length === 0 || !ctx.ingame()) {
+            if (this.trackerWidget !== null) {
+                dom.show(this.trackerWidget, false);
+            }
+            return;
+        }
+        if (this.trackerWidget === null) {
+            const a = this.trackerAnchor();
+            this.trackerWidget = dom.create('<div class="qol-panel"></div>', a.x, a.y, true);
+            if (this.trackerWidget !== null) {
+                this.trackerWidget.el.addEventListener('click', (): void => {
+                    this.collapsed = !this.collapsed;
+                    this.updateTrackerDom();
+                });
+            }
+        }
+        if (this.trackerWidget === null) {
+            return;
+        }
+        dom.show(this.trackerWidget, true);
+
+        let html = '<div class="qol-h"><span>XP Tracker</span><span class="qol-dim">' + (this.collapsed ? '[+]' : '[-]') + '</span></div>';
+        if (!this.collapsed) {
+            for (let r = 0; r < this.rows.length; r++) {
+                const s = this.rows[r];
+                const t = this.rowText[r];
+                const base: number = ctx.statBase(s.skill);
+                const eff: number = ctx.statLevel(s.skill);
+                const cls: string = eff > base ? 'qol-grn' : eff < base ? 'qol-red' : 'qol-dim';
+                const lvl: string = eff === base ? String(base) : eff + '/' + base;
+                html += '<div class="qol-row"><span>' + t.name + ' <span class="' + cls + '">' + lvl + '</span></span><span class="qol-yel">' + t.gain + '</span></div>';
+                html += '<div class="qol-row"><span class="qol-cyn">' + t.rate + ' &middot; ' + t.act + '</span><span class="qol-dim">' + t.ttl + '</span></div>';
+            }
+        }
+        this.trackerWidget.el.innerHTML = '<div class="qol-panel">' + html + '</div>';
+    }
+
+    /** Fallback buffer-space anchor when docking beside the client doesn't fit. */
+    private trackerAnchor(): { x: number; y: number } {
+        if (this.trackerPos === 1) return { x: 5, y: 5 };
+        if (this.trackerPos === 2) return { x: 330, y: 290 };
+        if (this.trackerPos === 3) return { x: 5, y: 290 };
+        return { x: 330, y: 5 };
     }
 
     // ---- drawing ----
@@ -473,6 +532,9 @@ class XpDropsPlugin {
     }
 
     private drawTracker(g: QolGraphics): void {
+        if (this.ctx.domDocks()) {
+            return; // the DOM dock owns the tracker
+        }
         if (!this.trackerOn || !this.ctx.ingame() || this.rows.length === 0) {
             return;
         }
@@ -521,6 +583,9 @@ class XpDropsPlugin {
     // ---- input ----
 
     private click(e: QolClickEvent): boolean {
+        if (this.ctx.domDocks()) {
+            return false; // collapse lives on the DOM header
+        }
         if (!this.trackerOn || !this.ctx.ingame() || this.rows.length === 0 || e.button !== 1) {
             return false;
         }

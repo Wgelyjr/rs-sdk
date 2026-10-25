@@ -18,9 +18,10 @@
 //    that buffer is cleared by `Pix2D.cls()` before each frame's blit — pixels
 //    written after `areaGame.draw(4, 4)` would never reach the screen.
 
-import { canvas2d } from '#/graphics/Canvas.js';
+import { canvas, canvas2d } from '#/graphics/Canvas.js';
 import Pix2D from '#/graphics/Pix2D.js';
 
+import { QolDom, qolDomEnsureCss } from '#/client/qol/QolDom.js';
 import QolSettingsPanel from '#/client/qol/QolSettingsPanel.js';
 import { QolConfig } from '#/client/qol/QolConfig.js';
 import { QolContext, QolMenuViewImpl } from '#/client/qol/QolContext.js';
@@ -66,6 +67,8 @@ export class Qol {
     readonly hooks: QolHooks = new QolHooks();
     /** Shared drawing facade. */
     readonly g: QolGraphics = new QolGraphics();
+    /** DOM overlay layer (frame orbs, dockable panels). */
+    readonly dom: QolDom = new QolDom();
     /** The facade passed to plugin `register(ctx)`. */
     readonly ctx: QolContext;
     /** Settings panel (C2 implements the body; the wiring is already here). */
@@ -89,6 +92,7 @@ export class Qol {
         this.config = new QolConfig(Qol.isBotBuildStatic());
         this.menuView = new QolMenuViewImpl(client);
         this.ctx = new QolContext(client, this.config, this.hooks, this.g, (cmd: string, cb: () => void) => this.registerChatCommand(cmd, cb));
+        this.ctx.dom = this.dom;
         this.panel = new QolSettingsPanel(this.ctx);
     }
 
@@ -103,6 +107,19 @@ export class Qol {
      * then, and dispatch sites are null-guarded until it returns.
      */
     init(): void {
+        // DOM docks (orbs on the frame beside the minimap, tracker/timer panels
+        // floating beside the client when the window is wide enough).
+        qolDomEnsureCss();
+        this.dom.attach(canvas);
+        this.config.define({
+            key: 'overlay.domDocks',
+            section: 'Overlays',
+            label: 'Dock overlays off-viewport',
+            type: 'boolean',
+            default: true,
+            tooltip: 'HP/Prayer orbs sit on the frame beside the minimap; the XP tracker and stat timers float beside the game window when it fits, instead of covering the viewport. Off draws them inside the viewport as before.'
+        });
+
         // Panel navigation before any plugin sees the input: F10 toggles
         // (in-game only, so login typing is never swallowed), ESC closes.
         this.hooks.onKey((ch: number): boolean => {
@@ -153,6 +170,8 @@ export class Qol {
 
     /** End of `Client.gameLoop()`; dt is wall-clock ms since the previous tick. */
     dispatchTick(): void {
+        // DOM docks reposition on canvas moves; cheap (few widgets, cached rect).
+        this.dom.layout();
         if (this.hooks.tickCount === 0) {
             return;
         }

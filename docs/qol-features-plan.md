@@ -502,3 +502,30 @@ Key facts every wave-2 chunk must respect:
 
 Make-All production interfaces (server-side), bank tag drag-and-drop editor, GPU rendering,
 HD models, roof removal, minimap zoom, plugin API for third parties.
+
+**True resizable client** (reflowing the fixed 765x503 interface to fill arbitrary window
+sizes) is deliberately deferred: every interface component is addressed in fixed frame
+coordinates, so it is a whole-interface re-layout, not a settings feature. The space
+complaint it answers is addressed in the interim by the DOM docks (§9) — overlays leave the
+viewport entirely whenever the window has room.
+
+## 9. Wave 4 — DOM overlay layer, spacing fixes, bottom bar toggle
+
+- **`QolDom.ts`** — DOM overlay layer: a 0x0 `position:fixed` anchor with widgets positioned
+  in canvas-buffer coordinates from the live canvas rect (crisp at any display scale, no
+  getImageData tile hack). Replaces the removed canvas-tile orb placement.
+- **`overlay.domDocks`** (bool, default on): HP/Prayer orbs render as DOM circles on the
+  stone frame beside the minimap (buffer anchor 519,118; click = setTab). XP tracker and
+  stat timers become DOM panels that float OUTSIDE the canvas — right edge first, left edge
+  on wide-short windows — stacking vertically; in-viewport canvas drawing (with backing
+  panels) is the fallback when no outside room exists. Off = the old in-viewport behavior.
+- **`overlay.bottomBar`** (bool, default on, `BottomBar.ts` plugin): hides the page's green
+  control bar under the canvas (`div#controls` in the engine views) via `display:none` —
+  no engine view edits. Display scaling stays reachable in-panel (`visual.displayScale`).
+- **Spacing fixes** (in-viewport fallbacks + combat strip): opponent strip rows no longer
+  overlap (name / bar / numbers-on-own-row, h=44); NPC exact text moves to the right of the
+  bar (stacked-NPC collisions); stat-timer rows get a backing panel (they collided with the
+  vanilla "Walk here" menu hint); tracker widened (172px, 24px rows).
+- **Crash hardening**: the clip-stack leak class is fixed (`g.resetClip()` in `finally` on
+  both draw passes). Mobile crash trace still pending from the user; nothing else to fix
+  until it lands.

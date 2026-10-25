@@ -14,6 +14,7 @@ import WorldOverlays from './WorldOverlays.js';
 import DialogKeys from './DialogKeys.js';
 import BankPlaceholders from './BankPlaceholders.js';
 import BankTabs from './BankTabs.js';
+import BottomBar from './BottomBar.js';
 
 /** Every plugin module: `export default { name, register(ctx) }`. */
 export const qolPlugins: ReadonlyArray<{ name: string; register(ctx: QolContext): void }> = [
@@ -25,7 +26,8 @@ export const qolPlugins: ReadonlyArray<{ name: string; register(ctx: QolContext)
     WorldOverlays,
     DialogKeys,
     BankPlaceholders,
-    BankTabs
+    BankTabs,
+    BottomBar
 ];
 
 /** Call every plugin's `register(ctx)` with per-plugin error containment. */
