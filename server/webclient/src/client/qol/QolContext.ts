@@ -246,11 +246,17 @@ export class QolContext {
 
     /** Item definition, or null for an unknown id. */
     objType(id: number): { name: string; cost: number; members: boolean } | null {
-        if (id < 0 || id >= ObjType.list.length) {
+        if (id < 0) {
             return null;
         }
-        const type: ObjType = ObjType.list(id);
-        return { name: type.name ?? `obj_${id}`, cost: type.cost, members: type.members };
+        // ObjType.list is a lazy decode over the cache packets (no static
+        // count); an out-of-range/uninitialized read throws.
+        try {
+            const type: ObjType = ObjType.list(id);
+            return { name: type.name ?? `obj_${id}`, cost: type.cost, members: type.members };
+        } catch {
+            return null;
+        }
     }
 
     /** Skill name from `Skill.names` (lower-case), or ''. */
