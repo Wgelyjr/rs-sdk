@@ -448,7 +448,57 @@ web client, drive with playwright-mcp (login test account, open panel, toggle, s
 - **Vendor sync (rev bump) severs hooks** → PATCHES.md entry with grep verification is
   mandatory (this repo's documented failure mode).
 
-## 7. Out of scope (v1)
+## 7. Foundation implementation notes (post-Wave 1, authoritative over §2 where they differ)
+
+The qol layer is implemented and committed (`519eabbdc`). Read the actual sources
+(`qol/QolContext.ts`, `QolHooks.ts`, `QolGraphics.ts`, `Qol.ts`, `QolConfig.ts`) — code is truth.
+Key facts every wave-2 chunk must respect:
+
+- **Coordinate spaces.** `drawScene`/`drawTop` paint into the 512x334 viewport scene buffer,
+  coordinates viewport-local (screen = +4,+4). `ctx.projectTile/projectEntity` return the same
+  space. `click`/`wheel` hook coordinates are full-frame (subtract 4 for scene-buffer math).
+  **`drawTop` cannot paint over the side panel / minimap / chat buffers** — UI outside the
+  viewport needs the canvas-tile capture/repaint technique used by `Qol.drawGearButton`
+  (capture `canvas2d.getImageData` once, restore + repaint each frame).
+- **Dispatch order in `gameDrawMain`**: renderAll → `drawScene` → vanilla overlays (modals/menus)
+  → `drawTop` → blit. So drawScene sits under interfaces, drawTop over interfaces, both inside
+  the viewport only.
+- **Panel/input priorities**: settings panel consumes clicks at priority 10000 and keys at
+  10001. Register below that (e.g. tile marking) so an open panel wins. ESC closes the panel
+  (already wired in Qol.ts); F10 toggles it; `::qol` toggles it; gear button wired.
+- **`menuBuilt`** fires on every `buildMinimenu()` call (each logic tick while hovering). Array
+  index `count-1` = menu top = left-click action. Never dispatched in bot builds.
+- **Middle mouse**: `client.mouseButton === 3` while held (own click code; vanilla ignores it);
+  no drag events — poll `mouseX/mouseY` in `tick` or inside the `camera` map handler. The qol
+  `click` hook receives button 3 with full-frame coords.
+- **Camera hook** is a map over reusable state `{pitch, distance, minPitch, maxPitch}`; return
+  modified values. Pitch clamps in `followCamera` + camera-shake re-clamp already honor
+  minPitch/maxPitch from the hook (defaults 128/383). Login overhead-view assignment (~4353)
+  stays vanilla and converges within a tick.
+- **`xpGain`** fires for every skill in a login burst (old 0 → stored XP): gate on
+  `newXp > oldXp && oldXp > 0`. Payload carries old+new xp and old+new base level.
+- **`tick(dtMs)`**: wall-clock since last dispatch; first dt may be 0, post-loading dt may be
+  huge — clamp.
+- **`ctx.npcs()/players()/groundItems()` return reused scratch arrays** — never retain across
+  frames.
+- **Translucency exists**: `Pix2D.fillRectTrans/drawRectTrans/hlineTrans/vlineTrans/fillCircle`
+  blend with alpha 0..256; `Pix3D.trans` global for 3D. `QolGraphics` wraps these
+  (`fillRectTrans`, `fillQuadTrans`, `fillStipple` checkerboard fallback, `fillGradientRect`).
+- **`ctx.pickTile(screenX, screenY)`** (full-frame coords) = inverse-projection scan ±25 tiles
+  around the local player, y-weighted nearest — covers unlocked zoom-out.
+- **Entity hider staleness**: items refused at OBJ_ADD while hidden do not resurrect until the
+  next map/zone load when unhidden; rendered stacks persist until their tile re-runs
+  `showObject`. Document in tooltips; acceptable for v1.
+- **`ctx.menuTarget()`** returns best-effort `{area, comId, slot}` hover context
+  (from `overMain/Side/ChatComId` + hovered slot). For item names, map comId+slot → item id via
+  `IfType.list[comId]` inventory arrays → `ObjType.list[id].name`.
+- **Chat commands**: `ctx.chatCommand('name', cb)` registers `::name`; `::qol` is taken.
+- **`process.env.ENABLE_BOT_SDK === 'true'`** is the bot-build check (`ctx.isBotBuild()`).
+- The 3 baseline tsc errors (StateCollector.ts:1040, lite/income.ts:710, lite/probe-locs.ts:66)
+  are pre-existing; leave them. While wave 2 runs in parallel, sibling plugin files may show
+  transient errors — ignore everything you don't own.
+
+## 8. Out of scope (v1)
 
 Make-All production interfaces (server-side), bank tag drag-and-drop editor, GPU rendering,
 HD models, roof removal, minimap zoom, plugin API for third parties.
