@@ -70,6 +70,8 @@ export default abstract class GameShell {
     private qolLogicAnchor: number = 0;
     private qolLogicAcc: number = 0;
     private qolLastWorkMs: number = 0;
+    /** Pacing sleep taken at the top of the current iteration (excluded from work). */
+    private qolTopSleepMs: number = 0;
     private qolIterEnd: number = 0;
     private qolWindowStart: number = 0;
     private qolWindowTicks: number = 0;
@@ -238,6 +240,7 @@ export default abstract class GameShell {
                 if (qolSleep < this.mindel) {
                     qolSleep = this.mindel;
                 }
+                this.qolTopSleepMs = qolSleep;
                 await sleep(qolSleep);
 
                 // qol: explicit wall-clock logic accumulator — every millisecond of
@@ -329,12 +332,15 @@ export default abstract class GameShell {
             }
 
             // qol: F9 — frame-end stamp: next iteration's window entry and work-time
-            // estimate. Taken here (after the framePace and tfps sleeps) so both the
-            // pacing math and the reported fps reflect the FULL iteration period.
+            // estimate. The work estimate EXCLUDES this iteration's top pacing
+            // sleep (qolTopSleepMs): including it made the next sleep =
+            // target - (sleep + work), converging the period to (target+work)/2
+            // instead of target (measured 178 Hz at a 120 cap).
             if (this.qolFrameTargetHz > 0) {
                 const qolEnd: number = performance.now();
                 this.qolIterEnd = qolEnd;
-                this.qolLastWorkMs = qolEnd - ntime;
+                const qolWork: number = qolEnd - ntime - this.qolTopSleepMs;
+                this.qolLastWorkMs = qolWork > 0 ? qolWork : 0;
             }
 
             if (this.debug) {
@@ -693,6 +699,12 @@ export default abstract class GameShell {
             ch = 0;
         }
 
+        // qol: ESC is a UI key (settings panel close) — without this the ch<30
+        // control-char zeroing drops it before the key queue ever sees it.
+        if (keyCode.code === 27) {
+            ch = 27;
+        }
+
         if (keyCode.code === 37) {
             ch = 1;
         } else if (keyCode.code === 39) {
@@ -753,6 +765,12 @@ export default abstract class GameShell {
 
         if (ch < 30) {
             ch = 0;
+        }
+
+        // qol: ESC is a UI key (settings panel close) — without this the ch<30
+        // control-char zeroing drops it before the key queue ever sees it.
+        if (keyCode.code === 27) {
+            ch = 27;
         }
 
         if (keyCode.code === 37) {

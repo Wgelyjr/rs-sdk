@@ -52,10 +52,11 @@ const FPS_TARGET_HZ: Record<string, number> = {
     'Unlimited': Number.POSITIVE_INFINITY
 };
 
-/** Inline style properties owned by this plugin while a scale mode is on. */
+/** Inline style properties owned by this plugin while a scale mode is on.
+ * setProperty() requires kebab-case CSS names — camelCase is a silent no-op. */
 const STYLE_WIDTH: number = 0;
 const STYLE_HEIGHT: number = 1;
-const STYLE_PROPS: string[] = ['width', 'height', 'maxWidth', 'maxHeight', 'imageRendering'];
+const STYLE_PROPS: string[] = ['width', 'height', 'max-width', 'max-height', 'image-rendering'];
 
 /** Re-assert check period (ms): cheap insurance against the page's size controls. */
 const VERIFY_INTERVAL_MS: number = 250;

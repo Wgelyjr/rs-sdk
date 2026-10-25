@@ -399,7 +399,7 @@ Upgrade hazards:
         stay cap-invariant. `qolFrameTargetHz = 0` (the default '50 (default)' setting)
         keeps the vanilla accumulator path byte-identical.
       Verify: `grep -cn "qol:" src/client/Client.ts src/client/GameShell.ts` — expect 27
-      (Client, plus one `qol-fix:` in `projectTileToScreen`) / 28 (GameShell) tagged lines,
+      (Client, plus one `qol-fix:` in `projectTileToScreen`) / 30 (GameShell) tagged lines,
       each hunk present; then
       `bunx tsc --noEmit -p server/webclient/tsconfig.json` and a bot regression
       (`bun test src/bot`) — the qol surface must stay invisible to the bot build
