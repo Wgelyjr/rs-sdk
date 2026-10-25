@@ -353,6 +353,45 @@ Upgrade hazards:
       accesses some via `as any`, so **`bunx tsc --noEmit` does NOT catch all of these**;
       grep-audit `(client as any).X` accesses after a sync.
 
+### QoL plugin hooks (`src/client/qol/`) — `Client.ts` + `GameShell.ts` touch points
+- [ ] **The QoL foundation** (rs-sdk-only `src/client/qol/**`) hangs ~14 tagged insertions
+      inside `src/client/Client.ts` and ~12 inside `src/client/GameShell.ts`; every one is
+      commented `// qol:` and each dispatch is a null-guarded no-op until `maininit()` runs
+      `this.qol = createQol(this)`. After any vendor sync, re-anchor these sites (line numbers
+      drift; search for the surrounding vanilla code):
+      - `Client.ts`: qol import + field; `createQol` at end of `maininit()`; `pollKey`
+        key-consume at BOTH sites (login text loop + `handleInputKey`); `::` chat-command
+        registry branch (before the `CLIENT_CHEAT` passthrough); `tick` at the very end of
+        `gameLoop()`; `menuBuilt` after the `_PRIORITY` sort in `buildMinimenu()` — MUST stay
+        gated on `!ENABLE_BOT_SDK` (StateCollector indexes the raw menu arrays); pitch-clamp
+        overrides in `followCamera()` and the camera-shake re-clamp in `gameDrawMain()`;
+        `camera` map over `{pitch, distance}` at the `camFollow(pitch, yaw, ..., pitch*3+600)`
+        call; `drawScene` between `textureRunAnims` and `otherOverlays`, `drawTop` right
+        before `areaGame.draw(4, 4)` — the draw hooks write the 512x334 scene buffer, so
+        screen coords = buffer coords + (4,4); entity-hider filters in `addPlayers`/`addNpcs`
+        (local player never hidden) / `addProjectiles` (after the expiry `unlink`) /
+        `entityOverlays` (overheads skip with the model) and ground-item filters on the
+        `OBJ_ADD`/`OBJ_REVEAL` pushes, the `showObject` stack pick and the obj menu pick in
+        `addWorldOptions`; `click` consume at the top of `mouseLoop()` (consumed ⇒ clear
+        `mouseClickButton` exactly like the vanilla handlers).
+        NOT overridden on purpose: the `orbitCameraPitch = 383` login overhead-view
+        assignment and the minimap ground-item dots.
+      - `GameShell.ts`: public `shiftHeld/altHeld/ctrlHeld` tracked from native events
+        (`onmousedown`/`onpointerdown`/`onkeydown`/`onkeyup`) — never pushed into
+        `keyHeld`/`keyQueue` (ch<30 zeroing leaks control chars into chat); middle mouse
+        captured as click code **3** (`mouseDown` + `onpointerdown` with `preventDefault`
+        against autoscroll, released in `onpointerup` since the compat mouseup is
+        suppressed; vanilla comparisons are all `=== 1/2` so 3 is inert); `onqolwheel`
+        listener registered in `run()`, nulled in `shutdown()`; `onqolresize` dispatch at
+        the end of `resize()`; `onqolframepace` sleep after `mainredraw()` (tfps logic kept).
+      Verify: `grep -cn "qol:" src/client/Client.ts src/client/GameShell.ts` — expect 27
+      (Client) / 16 (GameShell) tagged lines, each hunk present; then
+      `bunx tsc --noEmit -p server/webclient/tsconfig.json` and a bot regression
+      (`bun test src/bot`) — the qol surface must stay invisible to the bot build
+      (menuBuilt suppression + no member renames).
+      **⚠ An upstream sync that drops these tags silently kills every QoL feature: the
+      hooks fail closed (game runs normally, overlays/panel/camera/zoom go dead).**
+
 ### Build / shell
 - [ ] **`bundle.ts`** — `BUILD_MODE` standard/bot/both; **terser property mangling OFF**
       (mangling breaks bot.ejs/Puppeteer accessing client members by name).

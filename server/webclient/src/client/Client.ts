@@ -13,6 +13,8 @@ import MobileKeyboard from '#/client/MobileKeyboard.js';
 import MouseTracking from '#/client/MouseTracking.js';
 import Skill from '#/client/Skill.js';
 import TitleFlames from '#/client/TitleFlames.js';
+import { createQol } from '#/client/qol/index.js'; // qol: plugin foundation entry
+import type Qol from '#/client/qol/Qol.js'; // qol: type for the dispatch field
 
 import FloType from '#/config/FloType.js';
 import SeqType, { PostanimMove, PreanimMove, RestartMode } from '#/config/SeqType.js';
@@ -489,6 +491,10 @@ export class Client extends GameShell {
     private statEffectiveLevel: Int32Array = new Int32Array(Skill.count);
     private statBaseLevel: Int32Array = new Int32Array(Skill.count);
     private statXP: Int32Array = new Int32Array(Skill.count);
+
+    // qol: plugin layer facade, created at the end of maininit() once fonts and
+    // interfaces are loaded; every `// qol:` dispatch site null-checks it.
+    private qol: Qol | null = null;
 
     private oneMouseButton: number = 0;
     private isMenuOpen: boolean = false;
@@ -3676,6 +3682,9 @@ export class Client extends GameShell {
                     this.mouseTracking.cycle();
                 }, 50);
             }
+
+            // qol: assets (fonts, interfaces, sprites) are loaded — start the plugin layer
+            this.qol = createQol(this);
         } catch (e) {
             console.error(e);
 
@@ -3864,7 +3873,13 @@ export class Client extends GameShell {
             }
 
             while (true) {
-                const key: number = this.pollKey();
+                let key: number = this.pollKey();
+
+                // qol: offer the key to the hook bus first (panel hotkeys); consumed = ignored
+                if (key !== -1 && this.qol?.dispatchKey(key) === true) {
+                    key = -1;
+                }
+
                 if (key === -1) {
                     return;
                 }
@@ -4933,6 +4948,9 @@ export class Client extends GameShell {
                 await this.logout();
             }
         }
+
+        // qol: per-logic-frame tick hook (dt is wall-clock ms since the last dispatch)
+        this.qol?.dispatchTick();
     }
 
     private async logout(): Promise<void> {
@@ -5089,6 +5107,12 @@ export class Client extends GameShell {
                     sorted = false;
                 }
             }
+        }
+
+        // qol: menu finalized hook for reordering plugins — never in bot builds
+        // (StateCollector.collectMenuActions reads the raw arrays by index).
+        if (!ENABLE_BOT_SDK) {
+            this.qol?.dispatchMenuBuilt();
         }
     }
 
@@ -5444,6 +5468,12 @@ export class Client extends GameShell {
             do {
                 while (true) {
                     key = this.pollKey();
+
+                    // qol: offer the key to the hook bus first; consumed = treated as no key
+                    if (key !== -1 && this.qol?.dispatchKey(key) === true) {
+                        key = -1;
+                    }
+
                     if (key === -1) {
                         return;
                     }
@@ -5586,6 +5616,8 @@ export class Client extends GameShell {
                                 } catch (_e) {
                                     // empty
                                 }
+                            } else if (this.chatInput.startsWith('::') && this.qol?.handleChatCommand(this.chatInput.substring(2)) === true) {
+                                // qol: consumed by a registered '::qol'-style chat command
                             } else if (this.chatInput.startsWith('::')) {
                                 this.out.p1Enc(ClientProt.CLIENT_CHEAT);
                                 this.out.p1(this.chatInput.length - 2 + 1);
@@ -5756,10 +5788,15 @@ export class Client extends GameShell {
         this.orbitCameraYaw = ((this.orbitCameraYaw + this.orbitCameraYawVelocity / 2) | 0) & 0x7ff;
         this.orbitCameraPitch += (this.orbitCameraPitchVelocity / 2) | 0;
 
-        if (this.orbitCameraPitch < 128) {
-            this.orbitCameraPitch = 128;
-        } else if (this.orbitCameraPitch > 383) {
-            this.orbitCameraPitch = 383;
+        // qol: pitch clamps honor the camera map hook's minPitch/maxPitch overrides
+        const camLimits: { minPitch: number; maxPitch: number } | null = this.qol?.cameraLimits() ?? null;
+        const camMinPitch: number = camLimits !== null ? camLimits.minPitch : 128;
+        const camMaxPitch: number = camLimits !== null ? camLimits.maxPitch : 383;
+
+        if (this.orbitCameraPitch < camMinPitch) {
+            this.orbitCameraPitch = camMinPitch;
+        } else if (this.orbitCameraPitch > camMaxPitch) {
+            this.orbitCameraPitch = camMaxPitch;
         }
 
         const orbitTileX: number = this.orbitCameraX >> 7;
@@ -6702,7 +6739,13 @@ export class Client extends GameShell {
             const yaw: number = (this.orbitCameraYaw + this.macroCameraAngle) & 0x7ff;
 
             if (this.localPlayer) {
-                this.camFollow(pitch, yaw, this.orbitCameraX, this.getAvH(this.localPlayer.x, this.localPlayer.z, this.minusedlevel) - 50, this.orbitCameraZ, pitch * 3 + 600);
+                // qol: camera map hook over {pitch, distance} at the camFollow call site
+                const cam = this.qol?.mapCamera(pitch, pitch * 3 + 600) ?? null;
+                if (cam !== null) {
+                    this.camFollow(cam.pitch, yaw, this.orbitCameraX, this.getAvH(this.localPlayer.x, this.localPlayer.z, this.minusedlevel) - 50, this.orbitCameraZ, cam.distance);
+                } else {
+                    this.camFollow(pitch, yaw, this.orbitCameraX, this.getAvH(this.localPlayer.x, this.localPlayer.z, this.minusedlevel) - 50, this.orbitCameraZ, pitch * 3 + 600);
+                }
             }
         }
 
@@ -6736,12 +6779,17 @@ export class Client extends GameShell {
             } else if (axis === 4) {
                 this.camPitch += jitter;
 
-                if (this.camPitch < 128) {
-                    this.camPitch = 128;
+                // qol: re-clamp to the camera hook limits (vanilla 128/383 when no hook)
+                const shakeLimits: { minPitch: number; maxPitch: number } | null = this.qol?.cameraLimits() ?? null;
+                const shakeMinPitch: number = shakeLimits !== null ? shakeLimits.minPitch : 128;
+                const shakeMaxPitch: number = shakeLimits !== null ? shakeLimits.maxPitch : 383;
+
+                if (this.camPitch < shakeMinPitch) {
+                    this.camPitch = shakeMinPitch;
                 }
 
-                if (this.camPitch > 383) {
-                    this.camPitch = 383;
+                if (this.camPitch > shakeMaxPitch) {
+                    this.camPitch = shakeMaxPitch;
                 }
             }
         }
@@ -6758,7 +6806,16 @@ export class Client extends GameShell {
         this.entityOverlays();
         this.coordArrow();
         this.textureRunAnims(cycle);
+
+        // qol: in-world overlay pass into the scene buffer (clip = full 512x334
+        // viewport buffer, screen coords = +4,+4), under the interface pass
+        this.qol?.dispatchDrawScene();
+
         this.otherOverlays();
+
+        // qol: topmost UI pass — after modals/menus, before the buffer is blitted
+        this.qol?.dispatchDrawTop();
+
         this.areaGame?.draw(4, 4);
 
         this.camX = camX;
@@ -6805,6 +6862,11 @@ export class Client extends GameShell {
                 continue;
             }
 
+            // qol: entity hider filter (the `self` pass draws the local player — never hidden)
+            if (!self && this.qol?.hidePlayerFilter(player) === true) {
+                continue;
+            }
+
             player.lowMemory = false;
             if (((Client.lowMem && this.playerCount > 50) || this.playerCount > 200) && !self && player.secondaryAnim == player.readyanim) {
                 player.lowMemory = true;
@@ -6845,6 +6907,11 @@ export class Client extends GameShell {
                 continue;
             }
 
+            // qol: entity hider filter for npcs
+            if (this.qol?.hideNpcFilter(npc) === true) {
+                continue;
+            }
+
             const x: number = npc.x >> 7;
             const z: number = npc.z >> 7;
 
@@ -6869,6 +6936,11 @@ export class Client extends GameShell {
             if (proj.level !== this.minusedlevel || Client.loopCycle > proj.t2) {
                 proj.unlink();
             } else if (Client.loopCycle >= proj.t1) {
+                // qol: entity hider filter for projectiles (expiry unlink above still runs)
+                if (this.qol?.hideProjectileFilter(proj) === true) {
+                    continue;
+                }
+
                 if (proj.target > 0) {
                     const npc: ClientNpc | null = this.npc[proj.target - 1];
                     if (npc) {
@@ -7095,6 +7167,14 @@ export class Client extends GameShell {
             }
 
             if (!entity || !entity.isReady()) {
+                continue;
+            }
+
+            // qol: hidden entities skip their overhead pass too (index -1 is the
+            // local player, which the hider must never remove)
+            if (index !== -1 && (index < this.playerCount
+                ? this.qol?.hidePlayerFilter(entity as ClientPlayer) === true
+                : this.qol?.hideNpcFilter(entity as ClientNpc) === true)) {
                 continue;
             }
 
@@ -9256,6 +9336,10 @@ export class Client extends GameShell {
                 const xp: number = this.in.g4();
                 const level: number = this.in.g1();
 
+                // qol: capture pre-overwrite values for the xpGain hook
+                const qolOldXp: number = this.statXP[stat];
+                const qolOldLevel: number = this.statBaseLevel[stat];
+
                 this.statXP[stat] = xp;
                 this.statEffectiveLevel[stat] = level;
                 this.statBaseLevel[stat] = 1;
@@ -9265,6 +9349,9 @@ export class Client extends GameShell {
                         this.statBaseLevel[stat] = i + 2;
                     }
                 }
+
+                // qol: xpGain event (old + freshly computed base level)
+                this.qol?.dispatchXpGain(stat, qolOldXp, xp, qolOldLevel, this.statBaseLevel[stat]);
 
                 this.ptype = -1;
                 return true;
@@ -9831,12 +9918,18 @@ export class Client extends GameShell {
 
             if (x >= 0 && z >= 0 && x < BuildArea.SIZE && z < BuildArea.SIZE) {
                 const obj: ClientObj = new ClientObj(type, count);
-                if (!this.groundObj[this.minusedlevel][x][z]) {
-                    this.groundObj[this.minusedlevel][x][z] = new LinkList();
-                }
 
-                this.groundObj[this.minusedlevel][x][z]?.push(obj);
-                this.showObject(x, z);
+                // qol: entity hider refuses the item into groundObj entirely,
+                // keeping it invisible AND un-pickable (the pick paths filter
+                // items added before the toggle flipped on)
+                if (this.qol?.hideGroundItemFilter(obj) !== true) {
+                    if (!this.groundObj[this.minusedlevel][x][z]) {
+                        this.groundObj[this.minusedlevel][x][z] = new LinkList();
+                    }
+
+                    this.groundObj[this.minusedlevel][x][z]?.push(obj);
+                    this.showObject(x, z);
+                }
             }
         } else if (opcode === ServerProt.OBJ_DEL) {
             const type: number = buf.g2();
@@ -9898,13 +9991,16 @@ export class Client extends GameShell {
             const pid: number = buf.g2();
 
             if (x >= 0 && z >= 0 && x < BuildArea.SIZE && z < BuildArea.SIZE && pid !== this.selfSlot) {
-                if (!this.groundObj[this.minusedlevel][x][z]) {
-                    this.groundObj[this.minusedlevel][x][z] = new LinkList();
-                }
-
+                // qol: entity hider filter on the reveal path (same refusal as OBJ_ADD)
                 const obj: ClientObj = new ClientObj(id, count);
-                this.groundObj[this.minusedlevel][x][z]?.push(obj);
-                this.showObject(x, z);
+                if (this.qol?.hideGroundItemFilter(obj) !== true) {
+                    if (!this.groundObj[this.minusedlevel][x][z]) {
+                        this.groundObj[this.minusedlevel][x][z] = new LinkList();
+                    }
+
+                    this.groundObj[this.minusedlevel][x][z]?.push(obj);
+                    this.showObject(x, z);
+                }
             }
         } else if (opcode === ServerProt.P_LOCMERGE) {
             const info: number = buf.g1();
@@ -10179,6 +10275,11 @@ export class Client extends GameShell {
         let topObj: ClientObj | null = null;
 
         for (let obj = objs.head(); obj !== null; obj = objs.next()) {
+            // qol: entity hider filter — hidden items never enter the rendered stack
+            if (this.qol?.hideGroundItemFilter(obj) === true) {
+                continue;
+            }
+
             const type: ObjType = ObjType.list(obj.id);
             let cost: number = type.cost;
 
@@ -10861,6 +10962,13 @@ export class Client extends GameShell {
         }
 
         if (this.isMobile && this.dialogInputOpen && this.insideChatPopup()) {
+            return;
+        }
+
+        // qol: click consume hook — offered before menu/doAction routing; a
+        // consumed click clears the state exactly like the vanilla handlers do
+        if (this.mouseClickButton !== 0 && this.qol?.dispatchClick(this.mouseClickButton, this.mouseClickX, this.mouseClickY) === true) {
+            this.mouseClickButton = 0;
             return;
         }
 
@@ -12013,6 +12121,11 @@ export class Client extends GameShell {
                 }
 
                 for (let obj = objs.tail(); obj !== null; obj = objs.prev()) {
+                    // qol: entity hider keeps hidden items out of the menu, consistent with not rendering them
+                    if (this.qol?.hideGroundItemFilter(obj) === true) {
+                        continue;
+                    }
+
                     const type: ObjType = ObjType.list(obj.id);
                     if (this.useMode === 1) {
                         this.menuOption[this.menuNumEntries] = 'Use ' + this.objSelectedName + ' with @lre@' + type.name;

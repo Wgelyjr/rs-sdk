@@ -35,6 +35,29 @@ export default abstract class GameShell {
     protected keyQueueReadPos: number = 0;
     protected keyQueueWritePos: number = 0;
 
+    // qol: native modifier state, tracked from DOM events. Deliberately NOT routed
+    // through keyHeld/keyQueue: ch < 30 gets zeroed and control chars would leak
+    // into chat (plan §2.3).
+    public shiftHeld: boolean = false;
+    public altHeld: boolean = false;
+    public ctrlHeld: boolean = false;
+
+    // qol: middle mouse button state. Vanilla maps everything non-right to left,
+    // so the middle button keeps its own click code (mouseButton/mouseClickButton
+    // === 3) that no vanilla comparison consumes; the QoL click hook sees button 3.
+    public get middleButton(): boolean {
+        return this.mouseButton === 3;
+    }
+
+    // qol: hook callbacks assigned by the QoL layer (Qol.init()). Kept as plain
+    // function fields so GameShell stays independent of the qol/ directory.
+    // wheel: (dx, dy, canvasX, canvasY) -> consumed? (a consumed wheel stops the
+    // page scroll); resize: (canvasWidth, canvasHeight); framePace: (nowMs) ->
+    // extra ms to sleep after mainredraw().
+    public onqolwheel: ((dx: number, dy: number, x: number, y: number) => boolean) | null = null;
+    public onqolresize: ((width: number, height: number) => void) | null = null;
+    public onqolframepace: ((nowMs: number) => number | null) | null = null;
+
     /// custom
     protected resizeToFit: boolean = false;
     protected tfps: number = 50;
@@ -83,6 +106,11 @@ export default abstract class GameShell {
         canvas.height = height;
         this.drawArea = new PixMap(width, height);
         Pix3D.setRenderClipping();
+
+        // qol: resizeCanvas hook (display scaling plugins)
+        if (this.onqolresize !== null) {
+            this.onqolresize(width, height);
+        }
     }
 
     async run() {
@@ -103,6 +131,9 @@ export default abstract class GameShell {
         canvas.onpointermove = this.onpointermove.bind(this);
         window.onmouseup = this.windowMouseUp.bind(this);
         window.onmousemove = this.windowMouseMove.bind(this);
+
+        // qol: wheel events route through the hook bus (camera zoom, overlay scrolling)
+        canvas.onwheel = this.onqolwheelEvent.bind(this);
 
         if (this.isTouchDevice) {
             canvas.style.touchAction = 'pinch-zoom';
@@ -202,6 +233,14 @@ export default abstract class GameShell {
 
             await this.mainredraw();
 
+            // qol: framePace map hook — plugins (FPS caps) may request extra sleep
+            if (this.onqolframepace !== null) {
+                const qolPace: number | null = this.onqolframepace(performance.now());
+                if (qolPace !== null && qolPace > 0) {
+                    await sleep(qolPace);
+                }
+            }
+
             // this is custom for targeting specific fps (on mobile).
             if (this.tfps < 50) {
                 const tfps: number = 1000 / this.tfps - (performance.now() - ntime);
@@ -244,6 +283,7 @@ export default abstract class GameShell {
         canvas.onpointerenter = null;
         canvas.onpointerleave = null;
         canvas.onpointermove = null;
+        canvas.onwheel = null; // qol: remove the wheel hook listener
         canvas.removeEventListener('touchend', this.touchEndHandler);
         canvas.oncontextmenu = null;
         window.onmouseup = null;
@@ -304,12 +344,34 @@ export default abstract class GameShell {
 
     // ----
 
+    // qol: wheel listener; canvas-relative coords, native delta signs, consumed -> no page scroll
+    private onqolwheelEvent(e: WheelEvent) {
+        if (this.onqolwheel === null) {
+            return;
+        }
+
+        this.getMousePos(e);
+
+        if (this.onqolwheel(e.deltaX, e.deltaY, this.absMouseX, this.absMouseY)) {
+            e.preventDefault();
+        }
+    }
+
+    // qol: mirror native modifier flags (ch<30 zeroing makes keyQueue unusable for them)
+    private qolModifiersFrom(e: { shiftKey: boolean; altKey: boolean; ctrlKey: boolean }) {
+        this.shiftHeld = e.shiftKey;
+        this.altHeld = e.altKey;
+        this.ctrlHeld = e.ctrlKey;
+    }
+
     private onmousedown(e: MouseEvent) {
         if (e.clientX < 0 || e.clientY < 0) {
             return;
         }
 
         this.getMousePos(e);
+
+        this.qolModifiersFrom(e); // qol: track shift/alt/ctrl from the native event
 
         this.mouseDown(this.absMouseX, this.absMouseY, e);
     }
@@ -327,6 +389,14 @@ export default abstract class GameShell {
         if (e.button === 2) {
             this.nextMouseClickButton = 2;
             this.mouseButton = 2;
+        } else if (e.button === 1) {
+            // qol: middle button gets its own code (3) so vanilla — which maps
+            // every non-right press to left — never sees it, and the QoL click
+            // hook receives button 3. preventDefault kills the browser's
+            // middle-click autoscroll.
+            e.preventDefault();
+            this.nextMouseClickButton = 3;
+            this.mouseButton = 3;
         } else {
             this.nextMouseClickButton = 1;
             this.mouseButton = 1;
@@ -339,6 +409,25 @@ export default abstract class GameShell {
         }
 
         this.getMousePos(e);
+
+        // qol: middle button — cancel before the default autoscroll kicks in;
+        // preventDefault here also suppresses the compat mousedown, so mirror
+        // the button state that mouseDown() would have set (its own middle
+        // branch covers browsers that still deliver it).
+        if (e.button === 1) {
+            e.preventDefault();
+
+            this.idleTimer = performance.now();
+            this.nextMouseClickX = this.absMouseX;
+            this.nextMouseClickY = this.absMouseY;
+            this.nextMouseClickTime = performance.now();
+            this.mouseX = this.absMouseX;
+            this.mouseY = this.absMouseY;
+            this.nextMouseClickButton = 3;
+            this.mouseButton = 3;
+        }
+
+        this.qolModifiersFrom(e); // qol: track shift/alt/ctrl from the native event
 
         this.pointerDown(this.absMouseX, this.absMouseY, e);
     }
@@ -363,6 +452,14 @@ export default abstract class GameShell {
 
     private onpointerup(e: PointerEvent) {
         this.getMousePos(e);
+
+        // qol: the suppressed compat mouseup for middle clicks still must release held state
+        if (e.button === 1) {
+            this.idleTimer = performance.now();
+            this.mouseButton = 0;
+            this.mouseX = this.absMouseX;
+            this.mouseY = this.absMouseY;
+        }
 
         this.pointerUp(this.absMouseX, this.absMouseY, e);
     }
@@ -426,6 +523,8 @@ export default abstract class GameShell {
     private onkeydown(e: KeyboardEvent) {
         this.idleTimer = performance.now();
 
+        this.qolModifiersFrom(e); // qol: track shift/alt/ctrl from the native event
+
         const keyCode = KeyCodes.get(e.key);
         if (!keyCode || (e.code.length === 0 && !e.isTrusted)) {
             return;
@@ -485,6 +584,8 @@ export default abstract class GameShell {
         // }
 
         this.idleTimer = performance.now();
+
+        this.qolModifiersFrom(e); // qol: track shift/alt/ctrl from the native event
 
         const keyCode = KeyCodes.get(e.key);
         if (!keyCode || (e.code.length === 0 && !e.isTrusted)) {
