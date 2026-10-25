@@ -310,7 +310,12 @@ class WorldOverlaysImpl {
                 this.visibleLabels.push(label);
             }
             const label = this.visibleLabels[this.visibleLabels.length - 1];
-            const type = ObjType.list(e.id);
+            let type: ObjType;
+            try {
+                type = ObjType.list(e.id);
+            } catch {
+                continue; // config cache not ready / bad id: skip this stack
+            }
             const cost: number = type.cost > 0 ? type.cost : 1;
             const count: number = e.count > 0 ? e.count : 1;
             const val: number = cost * count;

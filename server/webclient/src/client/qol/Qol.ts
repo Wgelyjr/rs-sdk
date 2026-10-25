@@ -169,8 +169,14 @@ export class Qol {
         }
         const g: QolGraphics = this.g;
         g.pushClip(0, 0, Pix2D.width, Pix2D.height);
-        this.hooks.dispatchDrawScene(g);
-        g.popClip();
+        try {
+            this.hooks.dispatchDrawScene(g);
+        } finally {
+            // A handler that throws mid-draw may leave pushClip entries on the
+            // stack; a leaked clip corrupts every later draw (and grows the
+            // stack). Reset is cheap and makes handler throws stateless.
+            g.resetClip();
+        }
     }
 
     /** Topmost UI pass (after modals/menus), then the gear button tile. */
@@ -179,13 +185,16 @@ export class Qol {
         if (count > 0 || this.panel.isOpen()) {
             const g: QolGraphics = this.g;
             g.pushClip(0, 0, Pix2D.width, Pix2D.height);
-            if (count > 0) {
-                this.hooks.dispatchDrawTop(g);
+            try {
+                if (count > 0) {
+                    this.hooks.dispatchDrawTop(g);
+                }
+                if (this.panel.isOpen()) {
+                    this.panel.draw(g);
+                }
+            } finally {
+                g.resetClip();
             }
-            if (this.panel.isOpen()) {
-                this.panel.draw(g);
-            }
-            g.popClip();
         }
         this.drawGearButton();
     }

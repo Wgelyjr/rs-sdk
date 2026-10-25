@@ -1,9 +1,10 @@
 // Opponent HP bars (F11) + stat boost/drain timers (F12) + HP/Prayer orbs (F14)
 // — chunk C7 of docs/qol-features-plan.md §4. Hooks: `tick` (stat-change
 // timing), `drawScene` (npc head bars via the vanilla overlay projection),
-// `drawTop` (opponent strip, timer rows, orbs; the 'Minimap Left' orb
-// position uses the canvas-tile capture/repaint technique of Qol.drawGearButton
-// because that strip lives outside the scene buffer).
+// `drawTop` (opponent strip, timer rows, orbs; every orb position lives inside
+// the 512x334 scene buffer — the old 'Minimap Left' canvas-tile variant was
+// removed: its one-time background capture baked wrong pixels and misplaced
+// the orbs on the frame strip).
 //
 // Detection notes (code is truth, Client.ts rev 289):
 //  - NPC HP arrives with the HITMARK/HITMARK2 extended-update masks, which set
@@ -23,7 +24,6 @@
 //    server content/scripts/general/configs/tabs.constant: 0 = combat, 5 =
 //    prayer.
 
-import { canvas2d } from '#/graphics/Canvas.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Skill from '#/client/Skill.js';
 import { MiniMenuAction } from '#/client/MiniMenuAction.js';
@@ -68,13 +68,10 @@ const TARGET_WINDOW_CYCLES: number = 400;
 /** faceEntity encodes a player index above this bias (Client.entityFace). */
 const PLAYER_FACE_BIAS: number = 32768;
 
-/** Canvas-space tile for the 'Minimap Left' orbs — the dead strip between the
- *  viewport (ends x=516) and the side panel (hit-tests start x=553), kept
- *  clear of the qol gear button at x 519..545 / y 340..352. */
-const TILE_X: number = 519;
-const TILE_Y: number = 278;
-const TILE_W: number = 26;
-const TILE_H: number = 60;
+/** 'Right Edge' orb anchor: vertical stack hugging the viewport's right edge
+ *  (visually beside the minimap/menu column, but inside the scene buffer so
+ *  it needs no canvas-tile hack). */
+const RIGHT_EDGE_MARGIN: number = 5;
 
 /** One skill row in the stat-timer list (reused buffers — see `buildTimerRows`). */
 interface TimerRow {
@@ -94,7 +91,7 @@ class InfoOverlaysPlugin {
     private statTimersOn: boolean = true;
     private statTimerPos: number = 0; // 0 TL, 1 TR, 2 BL, 3 BR
     private orbMode: number = ORB_OFF;
-    private orbPos: number = 0; // 0 Viewport TL, 1 TR, 2 BL, 3 Minimap Left
+    private orbPos: number = 0; // 0 Viewport TL, 1 TR, 2 BL, 3 Right Edge
     private orbNumbers: boolean = true;
 
     // ---- F11 click-derived opponent ----
@@ -123,12 +120,9 @@ class InfoOverlaysPlugin {
         return rows;
     }
 
-    // ---- F14 orb layout + canvas tile ----
-    /** Reused layout rect, full-frame (canvas) or viewport-local (buffer) per `canvas`. */
+    // ---- F14 orb layout ----
+    /** Reused layout rect, viewport-local (scene buffer) coordinates. */
     private readonly orbRect = { x: 0, y: 0, w: 0, h: 0, canvas: false };
-    private tileCaptured: boolean = false;
-    private tileBackground: ImageData | null = null;
-    private tileDrawn: boolean = false;
 
     private ctx!: QolContext;
 
@@ -187,8 +181,8 @@ class InfoOverlaysPlugin {
             label: 'Orb position',
             type: 'choice',
             default: 'Viewport TL',
-            choices: ['Viewport TL', 'Viewport TR', 'Viewport BL', 'Minimap Left'],
-            tooltip: 'Minimap Left paints into the frame strip between viewport and side panel (canvas tile).'
+            choices: ['Viewport TL', 'Viewport TR', 'Viewport BL', 'Right Edge'],
+            tooltip: 'Where the HP/Prayer orbs sit inside the game viewport. Right Edge stacks them beside the minimap column.'
         });
         config.define({
             key: 'overlay.orbNumbers',
@@ -212,12 +206,6 @@ class InfoOverlaysPlugin {
         // side tabs on orb hits (consumes only inside the orb rects, only while
         // orbs are on). Priority 0: the settings panel (10000) still wins.
         ctx.hooks.onClick((e: QolClickEvent): boolean => this.click(e), 'info-click');
-
-        // The captured canvas tile is stale after any canvas resize — re-capture.
-        ctx.hooks.onResizeCanvas((): void => {
-            this.tileCaptured = false;
-            this.tileBackground = null;
-        }, 'info-tile-resize');
     }
 
     // ---- settings ----
@@ -229,7 +217,7 @@ class InfoOverlaysPlugin {
         this.statTimersOn = config.getBool('overlay.statTimers');
         this.statTimerPos = this.choiceOf(config.getStr('overlay.statTimerPos'), ['Top Left', 'Top Right', 'Bottom Left', 'Bottom Right'], 0);
         this.orbMode = this.choiceOf(config.getStr('overlay.orbMode'), ['Off', 'Orbs', 'Bars'], ORB_OFF);
-        this.orbPos = this.choiceOf(config.getStr('overlay.orbPos'), ['Viewport TL', 'Viewport TR', 'Viewport BL', 'Minimap Left'], 0);
+        this.orbPos = this.choiceOf(config.getStr('overlay.orbPos'), ['Viewport TL', 'Viewport TR', 'Viewport BL', 'Right Edge'], 0);
         this.orbNumbers = config.getBool('overlay.orbNumbers');
         if (this.npcHpMode === HP_OFF) {
             this.myTargetIndex = -1;
@@ -239,6 +227,31 @@ class InfoOverlaysPlugin {
     private choiceOf(value: string, choices: string[], fallback: number): number {
         const i: number = choices.indexOf(value);
         return i === -1 ? fallback : i;
+    }
+
+    /**
+     * Combat NPCs only: a positive vislevel or an 'Attack' right-click op.
+     * Tutorial guides, fishing spots, bankers etc. have neither and must never
+     * carry HP bars/strips even if hitmark data somehow arrives.
+     */
+    private isAttackable(npc: any): boolean {
+        const type = npc.type;
+        if (!type) {
+            return false;
+        }
+        if (type.vislevel > 0) {
+            return true;
+        }
+        const ops: (string | null)[] | null = type.op;
+        if (ops) {
+            for (let i: number = 0; i < ops.length; i++) {
+                const op: string | null = ops[i];
+                if (op !== null && op.toLowerCase().indexOf('attack') !== -1) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // ---- F12 tick: observe effective-level changes ----
@@ -354,6 +367,11 @@ class InfoOverlaysPlugin {
             if (!npc.isReady()) {
                 continue;
             }
+            // Never put HP elements on non-attackable NPCs (guides, fishing
+            // spots, bankers): no combat level and no Attack op = no bar.
+            if (!this.isAttackable(npc)) {
+                continue;
+            }
 
             // Same anchor the vanilla combat bar uses (head top, +15 height units).
             client.getOverlayPosEntity(npc, npc.height + 15);
@@ -382,7 +400,6 @@ class InfoOverlaysPlugin {
 
     private drawTop(g: QolGraphics): void {
         if (!this.ctx.ingame()) {
-            this.drawMinimapTile(); // still restores the tile when inactive
             return;
         }
         this.drawOpponentStrip(g);
@@ -417,7 +434,7 @@ class InfoOverlaysPlugin {
                 const npcs = ctx.npcs();
                 for (let n: number = 0; n < npcs.length; n++) {
                     const cand = npcs[n].npc;
-                    if (cand.faceEntity === faceMe && cand.combatCycle > loop && cand.combatCycle > bestCycle) {
+                    if (cand.faceEntity === faceMe && cand.combatCycle > loop && cand.combatCycle > bestCycle && this.isAttackable(cand)) {
                         bestCycle = cand.combatCycle;
                         npc = cand;
                     }
@@ -541,30 +558,30 @@ class InfoOverlaysPlugin {
     /** Compute the current orb block rect (viewport-local, or full-frame for the canvas tile). */
     private layoutOrbs(): { x: number; y: number; w: number; h: number; canvas: boolean } {
         const rect = this.orbRect;
-        rect.canvas = this.orbPos === POS_CANVAS;
+        rect.canvas = false;
         if (this.orbMode === ORB_DISCS) {
-            if (rect.canvas) {
-                rect.x = TILE_X;
-                rect.y = TILE_Y;
-                rect.w = TILE_W;
-                rect.h = TILE_H;
+            if (this.orbPos === POS_CANVAS) {
+                // Vertical disc stack at the viewport's right edge.
+                rect.w = 26;
+                rect.h = 56;
             } else {
                 rect.w = 56; // two 26px discs side by side + gap
                 rect.h = 26;
             }
         } else {
-            if (rect.canvas) {
-                rect.x = TILE_X;
-                rect.y = TILE_Y;
-                rect.w = TILE_W;
-                rect.h = 44;
+            if (this.orbPos === POS_CANVAS) {
+                rect.w = 96;
+                rect.h = 44; // two stacked bars + gap
             } else {
                 rect.w = 96;
                 rect.h = 24;
             }
         }
-        if (!rect.canvas) {
-            const m: number = 5;
+        const m: number = 5;
+        if (this.orbPos === POS_CANVAS) {
+            rect.x = 512 - m - rect.w;
+            rect.y = m;
+        } else {
             rect.x = this.orbPos === 1 ? 512 - m - rect.w : m;
             rect.y = this.orbPos === 2 ? 334 - m - rect.h : m;
         }
@@ -573,14 +590,9 @@ class InfoOverlaysPlugin {
 
     private drawOrbs(g: QolGraphics): void {
         if (this.orbMode === ORB_OFF) {
-            this.drawMinimapTile();
             return;
         }
         const rect = this.layoutOrbs();
-        if (rect.canvas) {
-            this.drawMinimapTile();
-            return;
-        }
         const ctx = this.ctx;
         const hp = ctx.statLevel(3); // Skill.names: hitpoints
         const hpBase = ctx.statBase(3);
@@ -588,18 +600,21 @@ class InfoOverlaysPlugin {
         const prayerBase = ctx.statBase(5);
 
         if (this.orbMode === ORB_DISCS) {
+            // Right Edge stacks the discs vertically; other positions side by side.
+            const dx: number = this.orbPos === POS_CANVAS ? 0 : 30;
+            const dy: number = this.orbPos === POS_CANVAS ? 30 : 0;
             this.drawDiscOrb(rect.x + 13, rect.y + 13, 10, hp / (hpBase > 0 ? hpBase : 1), COL_HP_FILL);
-            this.drawDiscOrb(rect.x + 13 + 30, rect.y + 13, 10, prayer / (prayerBase > 0 ? prayerBase : 1), COL_PR_FILL);
+            this.drawDiscOrb(rect.x + 13 + dx, rect.y + 13 + dy, 10, prayer / (prayerBase > 0 ? prayerBase : 1), COL_PR_FILL);
             if (this.orbNumbers) {
                 const f = ctx.fonts().p11;
                 if (f) {
                     g.centreText(f, String(hp), rect.x + 13, rect.y + 17, COL_WHITE);
-                    g.centreText(f, String(prayer), rect.x + 43, rect.y + 17, COL_WHITE);
+                    g.centreText(f, String(prayer), rect.x + 13 + dx, rect.y + 17 + dy, COL_WHITE);
                 }
             }
         } else {
-            this.drawBarOrb(g, rect.x, rect.y, hp, hpBase, COL_HP_FILL, 'HP');
-            this.drawBarOrb(g, rect.x, rect.y + 12, prayer, prayerBase, COL_PR_FILL, 'Pr');
+            this.drawBarOrb(g, rect.x, rect.y + 2, hp, hpBase, COL_HP_FILL, 'HP');
+            this.drawBarOrb(g, rect.x, rect.y + 16, prayer, prayerBase, COL_PR_FILL, 'Pr');
         }
     }
 
@@ -675,108 +690,6 @@ class InfoOverlaysPlugin {
         }
     }
 
-    /**
-     * 'Minimap Left' canvas tile (outside the scene buffer — drawTop cannot
-     * reach it): same capture/restore/repaint pattern as Qol.drawGearButton.
-     * Background is captured once (re-captured after resize) and restored every
-     * frame we do not paint, so no ghost survives toggling off.
-     */
-    private drawMinimapTile(): void {
-        if (typeof window === 'undefined' || canvas2d === null || canvas2d === undefined) {
-            return;
-        }
-        const active: boolean = this.ctx.ingame() && this.orbMode !== ORB_OFF && this.orbPos === POS_CANVAS;
-        if (!active && !this.tileDrawn) {
-            return;
-        }
-        try {
-            if (!this.tileCaptured) {
-                this.tileBackground = canvas2d.getImageData(TILE_X, TILE_Y, TILE_W, TILE_H);
-                this.tileCaptured = true;
-            }
-            if (this.tileBackground !== null) {
-                canvas2d.putImageData(this.tileBackground, TILE_X, TILE_Y);
-            }
-            if (active) {
-                this.paintTileOrbs(canvas2d);
-            }
-            this.tileDrawn = active;
-        } catch (e) {
-            // Detached context / out-of-bounds: drop the tile like the gear does.
-            this.tileCaptured = false;
-            this.tileBackground = null;
-            this.tileDrawn = false;
-        }
-    }
-
-    private paintTileOrbs(c2d: CanvasRenderingContext2D): void {
-        const ctx = this.ctx;
-        const hp = ctx.statLevel(3);
-        const hpBase = ctx.statBase(3);
-        const prayer = ctx.statLevel(5);
-        const prayerBase = ctx.statBase(5);
-        const cx: number = TILE_X + (TILE_W >> 1);
-
-        if (this.orbMode === ORB_DISCS) {
-            this.tileDisc(c2d, cx, TILE_Y + 14, 10, hp / (hpBase > 0 ? hpBase : 1), '#cc2020');
-            this.tileDisc(c2d, cx, TILE_Y + 42, 10, prayer / (prayerBase > 0 ? prayerBase : 1), '#d8e6ff');
-            if (this.orbNumbers) {
-                c2d.font = 'bold 9px monospace';
-                c2d.textAlign = 'center';
-                c2d.fillStyle = '#ffffff';
-                c2d.fillText(String(hp), cx, TILE_Y + 17);
-                c2d.fillText(String(prayer), cx, TILE_Y + 45);
-            }
-        } else {
-            this.tileBar(c2d, TILE_X + 1, TILE_Y + 4, hp, hpBase, '#cc2020');
-            this.tileBar(c2d, TILE_X + 1, TILE_Y + 22, prayer, prayerBase, '#d8e6ff');
-            if (this.orbNumbers) {
-                c2d.font = '8px monospace';
-                c2d.textAlign = 'center';
-                c2d.fillStyle = '#ffffff';
-                c2d.fillText(String(hp), cx, TILE_Y + 18);
-                c2d.fillText(String(prayer), cx, TILE_Y + 36);
-            }
-        }
-        c2d.textAlign = 'left'; // leave the shared context tidy-ish
-    }
-
-    private tileDisc(c2d: CanvasRenderingContext2D, cx: number, cy: number, r: number, ratio: number, fill: string): void {
-        const clamped: number = Math.min(Math.max(ratio, 0), 1);
-        c2d.fillStyle = '#0d0b09';
-        c2d.beginPath();
-        c2d.arc(cx, cy, r + 2, 0, Math.PI * 2);
-        c2d.fill();
-        c2d.fillStyle = '#282320';
-        c2d.beginPath();
-        c2d.arc(cx, cy, r, 0, Math.PI * 2);
-        c2d.fill();
-        if (clamped > 0) {
-            const h: number = 2 * r * clamped;
-            c2d.save();
-            c2d.beginPath();
-            c2d.rect(cx - r, cy + r - h, r * 2, h);
-            c2d.clip();
-            c2d.fillStyle = fill;
-            c2d.beginPath();
-            c2d.arc(cx, cy, r, 0, Math.PI * 2);
-            c2d.fill();
-            c2d.restore();
-        }
-    }
-
-    private tileBar(c2d: CanvasRenderingContext2D, x: number, y: number, value: number, base: number, fill: string): void {
-        const w: number = TILE_W - 2;
-        const h: number = 7;
-        const ratio: number = Math.min(Math.max(base > 0 ? value / base : 0, 0), 1);
-        c2d.fillStyle = '#282320';
-        c2d.fillRect(x, y, w, h);
-        c2d.fillStyle = fill;
-        c2d.fillRect(x, y, (w * ratio) | 0, h);
-        c2d.strokeStyle = '#0d0b09';
-        c2d.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-    }
-
     // ---- click handling ----
 
     /**
@@ -792,8 +705,8 @@ class InfoOverlaysPlugin {
 
         if (this.orbMode !== ORB_OFF) {
             const rect = this.layoutOrbs();
-            const px: number = rect.canvas ? e.x : e.x - 4; // scene buffer sits at (4,4)
-            const py: number = rect.canvas ? e.y : e.y - 4;
+            const px: number = e.x - 4; // scene buffer sits at (4,4)
+            const py: number = e.y - 4;
             if (px >= rect.x && px < rect.x + rect.w && py >= rect.y && py < rect.y + rect.h) {
                 const discIndex: number = this.hitOrb(rect, px - rect.x, py - rect.y);
                 if (discIndex !== -1) {
@@ -810,15 +723,12 @@ class InfoOverlaysPlugin {
     /** Which orb of the block contains the point: 0 = HP, 1 = Prayer, -1 = neither. */
     private hitOrb(rect: { x: number; y: number; w: number; h: number; canvas: boolean }, x: number, y: number): number {
         if (this.orbMode === ORB_DISCS) {
-            if (rect.canvas) {
-                return y < TILE_H / 2 ? 0 : 1;
+            if (this.orbPos === POS_CANVAS) {
+                return y < rect.h / 2 ? 0 : 1; // vertical stack
             }
             return x < rect.w / 2 ? 0 : 1;
         }
-        if (rect.canvas) {
-            return y < 20 ? 0 : 1;
-        }
-        return y < 12 ? 0 : 1;
+        return y < rect.h / 2 ? 0 : 1;
     }
 
     /**
