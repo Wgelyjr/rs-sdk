@@ -9,6 +9,10 @@
 | **Weight** | 500g |
 | **Value** | 0 gp |
 
+## Use
+
+- **Bury** (op 1 on the item, `iop1=Bury` in `server/content/scripts/skill_prayer/configs/bones.obj`) — trains **Prayer** XP. Verified live 2026-10-21: `Buried 2 bones (Prayer 6 495xp)`. Cows drop bones always, so any cow-farming bot can train Prayer for free.
+
 ## Spawn Locations
 
 | Area | Floor | Quantity |

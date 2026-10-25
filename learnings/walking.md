@@ -163,3 +163,51 @@ function isInAlKharid() {
     return player.worldX >= 3267 && player.worldZ < 3220;
 }
 ```
+
+## One-way doors (server-enforced)
+
+Some doors are one-way in one direction but **not** in the SDK's static
+`ONE_WAY_DOORS` list (pathfinding.ts) — so `walkTo` will happily path toward the
+blocked side and time out. Known:
+
+| Door | Coords | Behaviour |
+|------|--------|-----------|
+| Lumbridge→Al Kharid gate | (3268, 3227) / (3268, 3228) | One-way, server-enforced. The **west** (castle) side is open and safe; routing **east** toward Al Kharid dead-ends here and times out. The proven crossing is the **toll gate** (pay 10gp), not this door — see `sdk/test/alkharid-gate.ts`. |
+
+**Diagnostic red herring (2026-10-22):** a bot was reported "stuck at the
+one-way door" because a *route test* probed only the **east** target (the Al
+Kharid kebab, 3273,3180), which routes through the blocked door and timed out.
+The bot was actually already at the **west** castle (3222,3218), fully
+reachable, with pickpocketable Men right there. Lesson: when a route test times
+out, check which *direction* it probed and whether the bot's real position is
+already on the safe side — don't assume it's trapped.
+
+## Process hygiene (killing bot scripts)
+
+NEVER put a literal `bots/<name>/script.ts` path in the **same** shell command
+as `pkill -f` / `pgrep -f` — the pattern matches the shell's own command line and
+kills the shell. Kill in its own command using the bracket trick
+(`pkill -f 'bots/<name>/scr[i]pt'`), and launch in a **separate** command.
+(Careful: broad pkill patterns also killed the crew watchdog once, 2026-10-23.)
+
+## Cellar stairs: approach side matters, and the landing may be indoors (2026-10-23)
+
+- Varrock West Bank cellar stair (loc 1733 @ (3187,3433)): the op only routes from the
+  **west** tile (3186,3433, `reachable=true`); from the south tile (3187,3432) the client
+  returns `cant_reach` and writes no packet. When a loc-op "can't reach", probe each side
+  tile for `reachable` instead of giving up on the loc.
+- The stair's `p_telejump` lands at (3190,9833) — **inside a furnished building**
+  (chairs/tables/shelves; the Climb-up return stair loc 1734 sits at (3187,9833) in the
+  same room). An overland march from there dead-ends indoors; find the building exit (or
+  a different crossing) before marching.
+- A queued arrive-then-op can complete **after** the controlling script has returned:
+  march3 reported "climb failed", yet the bot ended up teleported. Poll a moment longer,
+  or re-read position on the next run before re-attempting.
+
+## Al Kharid toll gate tiles are a wedge trap (2026-10-23)
+
+Standing ON the gate ((3268,3227)/(3268,3228)) wedges the bot: every walkTo whose route
+crosses the gate re-fails ("impassable door — re-routing"), and no escape route resolves.
+The toll dialog chain works (interact gate → "Who does my money go to?" → "Yes, ok." →
+10 gp → teleport to x≥3270) but **requires 10 gp in the bag** — a penniless bot cannot
+self-rescue via the toll. Never park a coinless bot on the gate tile.

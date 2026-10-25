@@ -118,6 +118,13 @@ const groundItems = await sdk.scanGroundItems();
 const loot = groundItems.filter(i => /hide|bones|coins/i.test(i.name));
 ```
 
+**Ground-item source (2026-10-21):** Prefer `state.groundItems` (populated in the
+state snapshot, what the CLI's "Ground Items" section prints) over the on-demand
+`await sdk.scanGroundItems()` round-trip — in the guard's case the on-demand scan
+was silently returning `[]` while `state.groundItems` had the drops, so the pickup
+"found" nothing even though items were on the ground. If `scanGroundItems()`
+comes back empty but the CLI shows items, switch to `state.groundItems`.
+
 ### Limit Pickups Per Loop
 
 Pick up a few items (e.g. 3), then return to combat. Prevents getting stuck in infinite loot loops:
@@ -136,6 +143,20 @@ for (const item of loot) {
 }
 // Back to combat
 ```
+
+## Pickup Timing and Failure Modes (2026-10-21)
+
+- **Pick up while idle, not mid-attack.** A pickup op dispatched right after
+  `bot.attack()` is silently refused as a side-op of the active attack (no
+  message). Run the loot block *before* the attack, while the bot is standing
+  between fights. The guard's post-attack pickup picked up 0 hides for 4
+  sessions; moving it pre-attack fixed it.
+- **A full inventory silently blocks pickup.** `bot.pickupItem` into a full bag
+  is refused with no "inventory full" message — it waits 10s and returns reason
+  `timeout`. If pickups start timing out, check `sdk.getInventory().length`
+  (slots used) first: 28 = full.
+- **Ground item name is `Cowhide`** (one word), not "Cow hide". `/hide/i`
+  matches either way; an exact-name match must use `Cowhide`.
 
 ## Error Handling for Long Runs (Critical!)
 
@@ -204,3 +225,35 @@ console.log(`Training ${stat} with ${style.name}`);
 ```
 
 This pattern enabled balanced 60+ in all melee stats.
+
+## Surviving Aggressive Monsters (dark-wizard post-mortem, 2026-10-21)
+
+Two combat-12 bots died at the Draynor fishing spot (learnings/fishing.md)
+to L7 dark wizards. The rules that make an under-levelled bot survive:
+
+1. **Walk the moment `inCombat` turns true.** Never "wait out the fight"
+   standing still — a `waitOutFight`-style handler that only moves after a
+   25s XP-stall timer means standing still, and a low-HP bot dies in ~5s.
+   `await bot.walkTo(escape.x, escape.z, 2)` FIRST, then poll for combat to
+   drop.
+2. **The escape point must be OUT of chase range**, not just out of aggro
+   range. 3 tiles away was still inside the wizard's chase; 10-12 tiles
+   away (on a verified walkable strip) is safe. Lower z = south.
+3. **Equip, and re-equip after respawn.** A death drops the equipped gear;
+   the respawn grants a fresh starter kit (shortbow/bronze sword/wooden
+   shield) IN THE BAG, unarmed. Check `player.combat.weaponName` each loop:
+   if `/unarmed/i` and a sword is in the bag, `bot.equipItem()` it.
+4. **Know your respawn point.** qwenfish respawns at Lumbridge castle
+   (3222,3218) — dropped gear at the death site is lost unless retrieved.
+5. **Raw food is not edible** ("I need to cook this first.") — a bot with
+   only raw food has 0 heal. Cook at the Lumbridge range (3230,3196).
+6. **If the bot can't survive, train more first.** Combat 12 with
+   sword+shield still died to a L7 wizard (no food). Combat ~20 + food +
+   immediate escape is the working margin. Passive targets (cows) are the
+   safe way to close the gap — they give faster XP than chickens.
+7. **Death scatters EVERYTHING at the corpse** (source: `death.rs2`,
+   2026-10-23): `inv_dropall` dumps the full inventory **and worn gear** at the death
+   coord with a `lootdrop_duration` expiry — unretrieved drops vanish. Bank contents are
+   safe. This explains qwensmith's cleared bag after 6 desert deaths and qwenrune's lost
+   pickaxe. Ground-retrieval scans at the death site (like `ensurePickaxe`) partially
+   rescue; and any risky node needs food + gear *before* the run, not after a death.

@@ -173,6 +173,10 @@ Look out for "I can't reach" messages - the solution is often to open closed gat
 
 Read and grep in the learnings/ and wiki/ folder for tips, skill guides, item and npc locations, and shop information.
 
+**Managing running bots? Read `learnings/fleet-ops.md` first** - the symptom/cause/fix
+runbook (stuck bots, duplicate owners, toll-wedge and fake-stat signatures, exact
+kill/launch hygiene, and when to stop and ask the human).
+
 ## SDK API Reference
 
 For the complete method reference, see **[sdk/API.md](sdk/API.md)** (auto-generated from source).

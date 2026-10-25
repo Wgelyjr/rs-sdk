@@ -68,6 +68,15 @@ await bot.depositItem(/coins/i, -1);  // Deposits ALL coins (stacked)
 await sdk.sendBankDeposit(slot, -1);  // Deposits ALL items of that type from ANY slot
 ```
 
+**PITFALL (2026-10-21): A positive `count` only drains ONE slot.** `bot.depositItem(name, 6)` resolves to a single matching slot and sends `sendBankDeposit(slot, 6)` — for a *non-stacking* item (1 item per slot) that deposits just **1**, not 6. Raw beef is non-stacking (18 items = 18 slots), so `depositItem(RAW_FOOD, 6)` banked 1 and the bag stayed pinned full. For non-stacking items always use the `-1` all-match path (which iterates every matching id), or loop a single-slot deposit. Stacking items (coins, ore) are fine with a count.
+
+**Verified (2026-10-22): one `-1` call clears the whole item — no loop needed.**
+A single `depositItem(/^logs$/i, -1)` deposited all **22** non-stacking logs in
+one call — the bag went 27→5/28 and the deposit loop's second
+`findInventoryItem` returned null, so it broke after 1 iteration (logged
+`cleared 1 logs` while the whole stack was gone). You do NOT need to loop
+per-slot for `-1`; it sweeps every matching slot in a single call. A loop still
+works but is redundant.
 
 ## Withdrawing Items
 

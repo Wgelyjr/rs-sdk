@@ -96,6 +96,28 @@ async function pickpocketLoop(duration) {
 }
 ```
 
+## Choosing a Thieving Spot (income vs. safety)
+
+The value tier table (wiki/skills/thieving.md) is Man 3gp → Farmer 9gp →
+Warrior 18gp → Guard 30gp. But **which spot you can actually use is gated by
+combat level and travel safety, not just thieving level:**
+
+- **Combat < 20:** stick to city NPCs at the respawn point. The Lumbridge
+  castle Men/Women (3222,3218) are the safe baseline — they respawn right at
+  the spot, no travel, no aggressive monsters. Income is 3gp/pick but it
+  **self-improves** as Thieving climbs (fewer stuns = more picks/min).
+- **Combat ~20+** (combat.md working margin: ~20 + food + immediate escape):
+  you can travel to the 9gp **Farmers** (Barbarian Village 3154,3293 — watch the
+  Dark Wizard route, learnings/walking.md) or city Farmers (Varrock 3227,3290).
+  This is the real income unlock (3x).
+- **East of the Lumbridge→Al Kharid one-way door** (3268,3227) is only reachable
+  via the toll gate (pay 10gp) and the Al-Kharid warrior there pays ~3gp/pick
+  (no gain over castle Men) plus stranding risk — not worth it for income.
+
+Rule of thumb: **don't change the target until combat lets you travel safely.**
+A combat-7 bot at the castle is the correct setup; the upgrade is a combat
+raise, not a location change.
+
 ## Thieving + Banking Loop
 
 Bank when you hit 200-500 GP to avoid losing progress on disconnect:
@@ -217,3 +239,17 @@ Thieving requires no tools or equipment - making it ideal for:
 - Characters with no starting capital
 
 With Attack 70+ you could easily farm goblins for drops, but thieving works from level 1 with nothing in inventory.
+
+## Ardougne paladins: best yield/pick, unreachable at low combat (2026-10-23)
+
+Paladins (west Ardougne cluster, station ~(2579,3301)) pay **80 gp + 2 chaos runes per
+pick** (100% drops) vs 3 gp for Lumbridge men. But they sit in a ring of str50+ monsters:
+the in-process engine (`server/webclient/src/lite/income.ts`) empirically died twice
+crossing at combat 7 and is now parked under `HOLD=true` — **the crew's income is 0 gp/hr
+until it is retargeted**. Two notes for any retarget:
+
+- Paladins are passive (never fight back); Lumbridge castle men attack on a failed pick
+  (1 dmg/hit, plus the stun) — so a men loop needs the axe equipped + an eat branch.
+- Coins **stack in one slot**: a men loop needs no bank trip at all until the stack is
+  worth moving — food is the only real resupply (and there is no food shop at Lumbridge;
+  Aemad is in Ardougne, the Al Kharid kebab walk risks the toll wedge).
