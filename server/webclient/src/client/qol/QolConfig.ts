@@ -105,6 +105,20 @@ export class QolConfig {
             if (!Number.isNaN(parsed)) {
                 return parsed;
             }
+            // Color settings persist as '#rrggbb' (settings-panel normalizeColor);
+            // parse '#'-prefixed 3/6-hex so getNum-based plugins see panel-picked
+            // colors instead of silently falling back to the default.
+            const trimmed: string = value.trim();
+            if (trimmed.startsWith('#') && (trimmed.length === 4 || trimmed.length === 7)) {
+                let hex: string = trimmed.slice(1);
+                if (hex.length === 3) {
+                    hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+                }
+                const parsedHex: number = parseInt(hex, 16);
+                if (!Number.isNaN(parsedHex)) {
+                    return parsedHex;
+                }
+            }
         }
         const def = this.registry.get(key);
         return def !== undefined && typeof def.default === 'number' ? def.default : 0;
