@@ -2,7 +2,7 @@
 //
 // XP drops: floating '+N' texts in a right-aligned column at the right edge of
 // the 3D viewport (drawScene pass, viewport-local coords). New drops spawn at
-// the top and push older ones down; each drop rises ~9px/s and expires after
+// the top and push older ones down; each drop holds its row and expires after
 // 2.5s with a stipple fade over its last 300ms (PixFont has no alpha).
 //
 // XP tracker: session-scoped per-skill panel (drawTop pass) with XP gained,
@@ -45,8 +45,12 @@ const MAX_DROPS: number = 12;
 const DROP_LIFE_MS: number = 2500;
 const DROP_FADE_MS: number = 300;
 
-/** Drop rise speed in px/s. */
-const DROP_RISE_PX_S: number = 9;
+/**
+ * Drop rise speed in px/s — 0. Raising drops between spawns let them drift
+ * above their row, so a spawn's one-row push left adjacent drops closer than
+ * the text height (visible stacking). Drops now hold their row until expiry.
+ */
+const DROP_RISE_PX_S: number = 0;
 
 /** Right-aligned column: text ends here (viewport is 512 wide). */
 const DROP_RIGHT_X: number = 505;
@@ -450,7 +454,9 @@ class XpDropsPlugin {
         }
         if (this.trackerWidget === null) {
             const a = this.trackerAnchor();
-            this.trackerWidget = dom.create('<div class="qol-panel"></div>', a.x, a.y, true);
+            // qol: clickable — the container is pointer-events:none, so without
+            // this the collapse toggle's click listener never fires.
+            this.trackerWidget = dom.create('<div class="qol-panel"></div>', a.x, a.y, true, true);
             if (this.trackerWidget !== null) {
                 this.trackerWidget.el.addEventListener('click', (): void => {
                     this.collapsed = !this.collapsed;

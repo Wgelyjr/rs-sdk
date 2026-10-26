@@ -3667,8 +3667,9 @@ export class Client extends GameShell {
             Pix3D.setClipping(512, 334);
             this.gameScanline = Pix3D.scanline;
 
-            const distance: Int32Array = new Int32Array(9);
-            for (let x: number = 0; x < 9; x++) {
+            // qol: 15 pitch levels to match the extended visBacking (eyePitch 128..575)
+            const distance: Int32Array = new Int32Array(15);
+            for (let x: number = 0; x < 15; x++) {
                 const angle: number = x * 32 + 128 + 15;
                 const offset: number = angle * 3 + 600;
                 const sin: number = Pix3D.sinTable[angle];

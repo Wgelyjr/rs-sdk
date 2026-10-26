@@ -50,8 +50,14 @@ export default class BuildArea {
         const topZ = originZ + 6;
         const bottomZ = originZ - 6;
 
-        for (let x = centerX - 3; x <= centerX + 3; x++) {
-            for (let z = centerZ - 3; z <= centerZ + 3; z++) {
+        // qol: stream the whole 13x13 build area (origin±6, the client's full
+        // capacity) instead of a 7x7 zone square, so the webclient's extended
+        // render window (±50 tiles) has scenery to draw. Out-of-map zone
+        // columns create empty Zone objects (ZoneMap.zoneByIndex is on-demand)
+        // whose full-follows are a bare header - harmless. Per-tick cost is
+        // unchanged: partial updates only fire for zones in zonesTracking.
+        for (let x = centerX - 6; x <= centerX + 6; x++) {
+            for (let z = centerZ - 6; z <= centerZ + 6; z++) {
                 // check if the zone is within the build area
                 if (x < leftX || x > rightX || z > topZ || z < bottomZ) {
                     continue;

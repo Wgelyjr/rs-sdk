@@ -17,7 +17,7 @@ import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
 import Model from '#/dash3d/Model.js';
 
-import { Int32Array3d, TypedArray1d, TypedArray2d, TypedArray3d, TypedArray4d } from '#/util/Arrays.js';
+import { Int32Array3d, TypedArray1d, TypedArray2d, TypedArray3d } from '#/util/Arrays.js'; // qol: TypedArray4d dropped with the flat visBacking
 import type ModelSource from '#/dash3d/ModelSource.js';
 import type PointNormal from '#/dash3d/PointNormal.js';
 
@@ -113,8 +113,14 @@ export default class World {
     static groundX: number = -1;
     static groundZ: number = -1;
 
-    private static visBacking: boolean[][][][] = new TypedArray4d(8, 32, 51, 51, false);
-    private static visBackingDirty: boolean[][] | null = null;
+    // qol: flat visibility table, laid out (pitch, yaw, tileX, tileZ) with
+    // 101x101 tiles per (pitch, yaw). Vanilla: 8 pitch levels (eyePitch
+    // 128..383) over a ±25-tile (51x51) window. The unlocked camera
+    // (CameraUnlock) can pitch to 550 and the render window is ±50 tiles, so:
+    // 14 pitch levels (eyePitch 128..575) × 101x101 tiles. Flat Uint8Array
+    // (4.5 MB) instead of typed-array-of-arrays (~39 MB of JS objects).
+    private static visBacking: Uint8Array = new Uint8Array(14 * 32 * 101 * 101);
+    private static visBackingDirty: Uint8Array | null = null;
 
     static numActiveOccluders: number = 0;
     private static activeOccluders: (Occlude | null)[] = new TypedArray1d(500, null);
@@ -863,8 +869,12 @@ export default class World {
         this.xOrig = (viewportWidth / 2) | 0;
         this.yOrig = (viewportHeight / 2) | 0;
 
-        const visBacking: boolean[][][][] = new TypedArray4d(9, 32, 53, 53, false);
-        for (let pitch: number = 128; pitch <= 384; pitch += 32) {
+        // qol: flat local table — 15 pitch levels (one extra beyond the
+        // static 14, used as the pitch+1 dilation source) over a ±51-tile
+        // (103x103) area so the ±50-tile dilation copy has 3x3 headroom.
+        const visBacking: Uint8Array = new Uint8Array(15 * 32 * 103 * 103);
+        const local: number = 103 * 103;
+        for (let pitch: number = 128; pitch <= 576; pitch += 32) {
             for (let yaw: number = 0; yaw < 2048; yaw += 64) {
                 this.cameraSinX = Pix3D.sinTable[pitch];
                 this.cameraCosX = Pix3D.cosTable[pitch];
@@ -873,8 +883,9 @@ export default class World {
 
                 const pitchLevel: number = ((pitch - 128) / 32) | 0;
                 const yawLevel: number = (yaw / 64) | 0;
-                for (let dx: number = -26; dx <= 26; dx++) {
-                    for (let dz: number = -26; dz <= 26; dz++) {
+                const base: number = (pitchLevel * 32 + yawLevel) * local;
+                for (let dx: number = -51; dx <= 51; dx++) {
+                    for (let dz: number = -51; dz <= 51; dz++) {
                         const x: number = dx * 128;
                         const z: number = dz * 128;
 
@@ -886,43 +897,33 @@ export default class World {
                             }
                         }
 
-                        visBacking[pitchLevel][yawLevel][dx + 25 + 1][dz + 25 + 1] = visible;
+                        visBacking[base + (dx + 51) * 103 + (dz + 51)] = visible ? 1 : 0;
                     }
                 }
             }
         }
 
-        for (let pitchLevel: number = 0; pitchLevel < 8; pitchLevel++) {
+        for (let pitchLevel: number = 0; pitchLevel < 14; pitchLevel++) {
             for (let yawLevel: number = 0; yawLevel < 32; yawLevel++) {
-                for (let x: number = -25; x < 25; x++) {
-                    for (let z: number = -25; z < 25; z++) {
+                const base: number = (pitchLevel * 32 + yawLevel) * local;
+                const baseYaw: number = (pitchLevel * 32 + ((yawLevel + 1) % 31)) * local;
+                const basePitch: number = ((pitchLevel + 1) * 32 + yawLevel) * local;
+                const basePitchYaw: number = ((pitchLevel + 1) * 32 + ((yawLevel + 1) % 31)) * local;
+                for (let x: number = -50; x < 50; x++) {
+                    for (let z: number = -50; z < 50; z++) {
                         let visible: boolean = false;
 
                         check_areas: for (let dx: number = -1; dx <= 1; dx++) {
                             for (let dz: number = -1; dz <= 1; dz++) {
-                                if (visBacking[pitchLevel][yawLevel][x + dx + 25 + 1][z + dz + 25 + 1]) {
-                                    visible = true;
-                                    break check_areas;
-                                }
-
-                                if (visBacking[pitchLevel][(yawLevel + 1) % 31][x + dx + 25 + 1][z + dz + 25 + 1]) {
-                                    visible = true;
-                                    break check_areas;
-                                }
-
-                                if (visBacking[pitchLevel + 1][yawLevel][x + dx + 25 + 1][z + dz + 25 + 1]) {
-                                    visible = true;
-                                    break check_areas;
-                                }
-
-                                if (visBacking[pitchLevel + 1][(yawLevel + 1) % 31][x + dx + 25 + 1][z + dz + 25 + 1]) {
+                                const li: number = (x + dx + 51) * 103 + (z + dz + 51);
+                                if (visBacking[base + li] || visBacking[baseYaw + li] || visBacking[basePitch + li] || visBacking[basePitchYaw + li]) {
                                     visible = true;
                                     break check_areas;
                                 }
                             }
                         }
 
-                        this.visBacking[pitchLevel][yawLevel][x + 25][z + 25] = visible;
+                        this.visBacking[(pitchLevel * 32 + yawLevel) * 101 * 101 + (x + 50) * 101 + (z + 50)] = visible ? 1 : 0;
                     }
                 }
             }
@@ -971,7 +972,12 @@ export default class World {
         World.cameraSinY = Pix3D.sinTable[eyeYaw];
         World.cameraCosY = Pix3D.cosTable[eyeYaw];
 
-        World.visBackingDirty = World.visBacking[((eyePitch - 128) / 32) | 0][(eyeYaw / 64) | 0];
+        // qol: flat table view for this frame's (pitch, yaw). 14 pitch levels
+        // cover eyePitch 128..575 (unlocked camera max is 550); the level is
+        // clamped so an out-of-range pitch degrades instead of crashing.
+        const visPitchLevel: number = Math.min(13, Math.max(0, ((eyePitch - 128) / 32) | 0));
+        const visYawLevel: number = (eyeYaw / 64) | 0;
+        World.visBackingDirty = World.visBacking.subarray((visPitchLevel * 32 + visYawLevel) * 101 * 101);
         World.cx = eyeX;
         World.cy = eyeY;
         World.cz = eyeZ;
@@ -979,22 +985,24 @@ export default class World {
         World.gz = (eyeZ / 128) | 0;
         World.maxLevel = maxLevel;
 
-        World.minX = World.gx - 25;
+        // qol: render window widened ±25 → ±50 tiles (the map is 104x104, so
+        // this covers the whole map from anywhere).
+        World.minX = World.gx - 50;
         if (World.minX < 0) {
             World.minX = 0;
         }
 
-        World.minZ = World.gz - 25;
+        World.minZ = World.gz - 50;
         if (World.minZ < 0) {
             World.minZ = 0;
         }
 
-        World.maxX = World.gx + 25;
+        World.maxX = World.gx + 50;
         if (World.maxX > this.maxTileX) {
             World.maxX = this.maxTileX;
         }
 
-        World.maxZ = World.gz + 25;
+        World.maxZ = World.gz + 50;
         if (World.maxZ > this.maxTileZ) {
             World.maxZ = this.maxTileZ;
         }
@@ -1011,7 +1019,7 @@ export default class World {
                         continue;
                     }
 
-                    if (tile.drawLevel <= maxLevel && (World.visBackingDirty[x + 25 - World.gx][z + 25 - World.gz] || this.groundh[level][x][z] - eyeY >= 2000)) {
+                    if (tile.drawLevel <= maxLevel && (World.visBackingDirty[(x + 50 - World.gx) * 101 + (z + 50 - World.gz)] || this.groundh[level][x][z] - eyeY >= 2000)) { // qol: flat table, ±50 window
                         tile.drawFront = true;
                         tile.drawBack = true;
                         tile.drawSprites = tile.spriteCount > 0;
@@ -1027,7 +1035,7 @@ export default class World {
 
         for (let level: number = this.minLevel; level < this.maxTileLevel; level++) {
             const tiles: (Square | null)[][] = this.squares[level];
-            for (let dx: number = -25; dx <= 0; dx++) {
+            for (let dx: number = -50; dx <= 0; dx++) { // qol: ±50 window
                 const rightTileX: number = World.gx + dx;
                 const leftTileX: number = World.gx - dx;
 
@@ -1035,7 +1043,7 @@ export default class World {
                     continue;
                 }
 
-                for (let dz: number = -25; dz <= 0; dz++) {
+                for (let dz: number = -50; dz <= 0; dz++) { // qol: ±50 window
                     const forwardTileZ: number = World.gz + dz;
                     const backwardTileZ: number = World.gz - dz;
                     let tile: Square | null;
@@ -1082,7 +1090,7 @@ export default class World {
 
         for (let level: number = this.minLevel; level < this.maxTileLevel; level++) {
             const tiles: (Square | null)[][] = this.squares[level];
-            for (let dx: number = -25; dx <= 0; dx++) {
+            for (let dx: number = -50; dx <= 0; dx++) { // qol: ±50 window
                 const rightTileX: number = World.gx + dx;
                 const leftTileX: number = World.gx - dx;
 
@@ -1090,7 +1098,7 @@ export default class World {
                     continue;
                 }
 
-                for (let dz: number = -25; dz <= 0; dz++) {
+                for (let dz: number = -50; dz <= 0; dz++) { // qol: ±50 window
                     const forwardTileZ: number = World.gz + dz;
                     const backgroundTileZ: number = World.gz - dz;
                     let tile: Square | null;
@@ -1255,21 +1263,21 @@ export default class World {
             let deltaMaxTileX: number;
 
             if (occluder.type === 1) {
-                deltaMaxY = occluder.minTileX + 25 - World.gx;
-                if (deltaMaxY >= 0 && deltaMaxY <= 50) {
-                    deltaMinTileZ = occluder.minTileZ + 25 - World.gz;
+                deltaMaxY = occluder.minTileX + 50 - World.gx; // qol: ±50 window
+                if (deltaMaxY >= 0 && deltaMaxY <= 100) {
+                    deltaMinTileZ = occluder.minTileZ + 50 - World.gz;
                     if (deltaMinTileZ < 0) {
                         deltaMinTileZ = 0;
                     }
 
-                    deltaMaxTileZ = occluder.maxTileZ + 25 - World.gz;
-                    if (deltaMaxTileZ > 50) {
-                        deltaMaxTileZ = 50;
+                    deltaMaxTileZ = occluder.maxTileZ + 50 - World.gz;
+                    if (deltaMaxTileZ > 100) {
+                        deltaMaxTileZ = 100;
                     }
 
                     let ok: boolean = false;
                     while (deltaMinTileZ <= deltaMaxTileZ) {
-                        if (World.visBackingDirty && World.visBackingDirty[deltaMaxY][deltaMinTileZ++]) {
+                        if (World.visBackingDirty && World.visBackingDirty[deltaMaxY * 101 + (deltaMinTileZ++)]) { // qol: flat table
                             ok = true;
                             break;
                         }
@@ -1296,22 +1304,22 @@ export default class World {
                     }
                 }
             } else if (occluder.type === 2) {
-                deltaMaxY = occluder.minTileZ + 25 - World.gz;
+                deltaMaxY = occluder.minTileZ + 50 - World.gz; // qol: ±50 window
 
-                if (deltaMaxY >= 0 && deltaMaxY <= 50) {
-                    deltaMinTileZ = occluder.minTileX + 25 - World.gx;
+                if (deltaMaxY >= 0 && deltaMaxY <= 100) {
+                    deltaMinTileZ = occluder.minTileX + 50 - World.gx;
                     if (deltaMinTileZ < 0) {
                         deltaMinTileZ = 0;
                     }
 
-                    deltaMaxTileZ = occluder.maxTileX + 25 - World.gx;
-                    if (deltaMaxTileZ > 50) {
-                        deltaMaxTileZ = 50;
+                    deltaMaxTileZ = occluder.maxTileX + 50 - World.gx;
+                    if (deltaMaxTileZ > 100) {
+                        deltaMaxTileZ = 100;
                     }
 
                     let ok: boolean = false;
                     while (deltaMinTileZ <= deltaMaxTileZ) {
-                        if (World.visBackingDirty && World.visBackingDirty[deltaMinTileZ++][deltaMaxY]) {
+                        if (World.visBackingDirty && World.visBackingDirty[(deltaMinTileZ++) * 101 + deltaMaxY]) { // qol: flat table
                             ok = true;
                             break;
                         }
@@ -1341,31 +1349,31 @@ export default class World {
                 deltaMaxY = occluder.minY - World.cy;
 
                 if (deltaMaxY > 128) {
-                    deltaMinTileZ = occluder.minTileZ + 25 - World.gz;
+                    deltaMinTileZ = occluder.minTileZ + 50 - World.gz; // qol: ±50 window
                     if (deltaMinTileZ < 0) {
                         deltaMinTileZ = 0;
                     }
 
-                    deltaMaxTileZ = occluder.maxTileZ + 25 - World.gz;
-                    if (deltaMaxTileZ > 50) {
-                        deltaMaxTileZ = 50;
+                    deltaMaxTileZ = occluder.maxTileZ + 50 - World.gz;
+                    if (deltaMaxTileZ > 100) {
+                        deltaMaxTileZ = 100;
                     }
 
                     if (deltaMinTileZ <= deltaMaxTileZ) {
-                        let deltaMinTileX: number = occluder.minTileX + 25 - World.gx;
+                        let deltaMinTileX: number = occluder.minTileX + 50 - World.gx;
                         if (deltaMinTileX < 0) {
                             deltaMinTileX = 0;
                         }
 
-                        deltaMaxTileX = occluder.maxTileX + 25 - World.gx;
-                        if (deltaMaxTileX > 50) {
-                            deltaMaxTileX = 50;
+                        deltaMaxTileX = occluder.maxTileX + 50 - World.gx;
+                        if (deltaMaxTileX > 100) {
+                            deltaMaxTileX = 100;
                         }
 
                         let ok: boolean = false;
                         find_visible_tile: for (let x: number = deltaMinTileX; x <= deltaMaxTileX; x++) {
                             for (let z: number = deltaMinTileZ; z <= deltaMaxTileZ; z++) {
-                                if (World.visBackingDirty && World.visBackingDirty[x][z]) {
+                                if (World.visBackingDirty && World.visBackingDirty[x * 101 + z]) { // qol: flat table
                                     ok = true;
                                     break find_visible_tile;
                                 }

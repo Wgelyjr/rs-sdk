@@ -79,13 +79,18 @@ export class QolDom {
     }
 
     /** Create a widget; `html` is its initial inner markup. */
-    create(html: string, x: number, y: number, dockOutside: boolean = false): QolDomWidget | null {
+    /**
+     * @param clickable when true the widget receives pointer events (the
+     *   container is `pointer-events: none`, so without this a widget's click
+     *   listeners never fire — e.g. the XP tracker's collapse toggle)
+     */
+    create(html: string, x: number, y: number, dockOutside: boolean = false, clickable: boolean = false): QolDomWidget | null {
         if (this.container === null) {
             return null;
         }
         const el = document.createElement('div');
         el.style.position = 'absolute';
-        el.style.pointerEvents = 'none';
+        el.style.pointerEvents = clickable ? 'auto' : 'none';
         el.style.display = 'none';
         // The container is a 0x0 anchor; without an explicit width the
         // widget shrink-fits to ~0 and its text wraps one word per line.

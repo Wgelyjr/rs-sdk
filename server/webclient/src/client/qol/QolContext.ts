@@ -335,6 +335,27 @@ export class QolContext {
         return null;
     }
 
+    /**
+     * Re-run the client's minimenu build for the current pointer position and
+     * re-dispatch `menuBuilt`. The vanilla client only rebuilds on mouse
+     * movement, so a click at a stationary cursor executes the menu built by
+     * the last hover — call this from a click hook (before the vanilla
+     * doAction routing) when a modifier's state has changed since that build.
+     * No-op while a drag is in progress or a right-click menu is open.
+     */
+    rebuildMenu(): void {
+        const client: any = this.client;
+        if (client === null || client === undefined) {
+            return;
+        }
+        if (client.objDragArea !== 0 || client.isMenuOpen === true) {
+            return;
+        }
+        if (typeof client.buildMinimenu === 'function') {
+            client.buildMinimenu();
+        }
+    }
+
     /** Register a `::cmd` chat command; `cb` runs instead of the CLIENT_CHEAT passthrough. */
     chatCommand(cmd: string, cb: () => void): void {
         this.registerChatCommand(cmd, cb);

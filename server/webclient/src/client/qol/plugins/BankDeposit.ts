@@ -15,11 +15,29 @@
 //   bank scripts, so the burst is not throttled.)
 //
 // "Deposit Worn" — wornitems:wear (1688) carries only ["Remove"] (unequip to
-//   inventory; equip.rs2 inv_button1 → ~unequip, no p_delay); the bank has no
-//   direct worn→bank path. So two phases:
-//     phase 1: INV_BUTTON1 ("Remove") burst over all occupied worn slots;
-//     phase 2: SETTLE_MS later (server processing + interface-update
-//              round-trip) re-read 2006 and fire the Deposit Inv burst.
+//   inventory; the bank has no direct worn→bank path). The game's own Remove
+//   script (server/content/scripts/player/scripts/equip.rs2,
+//   [inv_button1,wornitems:wear]) starts with `if_close;` — PlayerOps'
+//   IF_CLOSE handler runs player.closeModal(), which closes the bank before
+//   the unequip lands. That is vanilla game behaviour (a manual Remove with
+//   the bank open closes it identically), so the button works around it:
+//
+//     phase 1: INV_BUTTON1 ("Remove") burst over all occupied worn slots.
+//              The bank closes as a side effect of the FIRST Remove — the
+//              burst still lands because the equipment screen (1644) sits in
+//              the player's tab list, which closeModal() does not clear.
+//     phase 2: WORN_REOPEN_DELAY_MS later, re-open the bank the vanilla way —
+//              OPLOC2 on the nearest bank chest (bank_booth.rs2: oploc2 goes
+//              straight to @openbank, no banker dialogue) or OPNPC3 on a
+//              nearby banker NPC (banker.rs2: apnpc3 → @openbank).
+//     phase 3: once isBankOpen() (plus WORN_DEPOSIT_DELAY_MS so the
+//              interface/inventory updates land) fire the Deposit Inv burst.
+//
+//   Net effect of one click: everything worn ends up in the bank. If the
+//   bank cannot be found to reopen (no chest/booth within scan radius, no
+//   banker), the items simply stay in the inventory — the same result a
+//   manual Remove produces.
+//
 //   Items that don't fit in a too-full inventory get the vanilla "not enough
 //   free space" message and stay worn — same constraint as manual unequips.
 //
@@ -33,6 +51,7 @@
 // only, priority 8000 (same tier as bank-tabs).
 
 import IfType from '#/config/IfType.js';
+import LocType from '#/config/LocType.js';
 
 import type { QolContext } from '#/client/qol/QolContext.js';
 import type QolGraphics from '#/client/qol/QolGraphics.js';
@@ -55,8 +74,36 @@ const WORN_INV_ID: number = 1688;
 /** "Remove" (unequip to inventory) — option index into the iop above. */
 const REMOVE_OPTION: number = 1;
 
-/** Settle window between the unequip burst and the deposit burst (ms). */
-const SETTLE_MS: number = 400;
+/** Deposit Worn phases (see the header for the flow). */
+const PHASE_IDLE: number = 0;
+/** Remove burst sent; waiting for the bank to close before reopening. */
+const PHASE_PENDING_REOPEN: number = 1;
+/** Reopen op sent; waiting for the bank to open, then the deposit burst. */
+const PHASE_AWAITING_BANK: number = 2;
+
+/** Remove burst → reopen op delay (ms): server processing + close round-trip. */
+const WORN_REOPEN_DELAY_MS: number = 500;
+/** Max wait for the bank to reopen before giving up (ms). */
+const WORN_REOPEN_TIMEOUT_MS: number = 8000;
+/** Bank confirmed open → deposit burst delay (ms): lets the interface and
+ *  inventory updates for the reopened window land. */
+const WORN_DEPOSIT_DELAY_MS: number = 250;
+/** Tiles around the player to scan for the bank chest/booth. */
+const BANK_CHEST_SCAN_RADIUS: number = 2;
+/** Tiles around the player to scan for a fallback banker NPC. */
+const BANKER_SCAN_RADIUS: number = 3;
+
+/** A reopen target found near the player. */
+interface BankTarget {
+    kind: 'loc' | 'npc';
+    /** loc only: absolute world tile. */
+    worldX: number;
+    worldZ: number;
+    /** loc id or npc index. */
+    id: number;
+    /** 1-based op index (loc: 2 = quick open; npc: 3 = use/withdraw). */
+    opIndex: number;
+}
 
 const BTN_H: number = 13;
 const BTN_PAD_X: number = 6;
@@ -84,8 +131,12 @@ class BankDepositPlugin {
     private winOffset: { x: number; y: number } | null = null;
     /** Live button rects, repainted every drawTop frame. */
     private rects: BtnRect[] = [];
-    /** nowMs at which phase 2 (the deposit burst) fires; 0 = idle. */
-    private pendingDepositAt: number = 0;
+    /** Deposit Worn flow state (see PHASE_*). */
+    private wornPhase: number = PHASE_IDLE;
+    /** nowMs when the current phase started (or the pending action fires). */
+    private wornPhaseAt: number = 0;
+    /** nowMs the bank first read open during PHASE_AWAITING_BANK; 0 = not yet. */
+    private bankOpenedAt: number = 0;
 
     register(ctx: QolContext): void {
         ctx.config.define({
@@ -94,7 +145,7 @@ class BankDepositPlugin {
             label: 'Quick deposit buttons',
             type: 'boolean',
             default: true,
-            tooltip: 'Deposit Inv / Deposit Worn buttons on the bank window title row. Deposit Inv empties the inventory; Deposit Worn unequips everything and then deposits it.'
+            tooltip: 'Deposit Inv / Deposit Worn buttons on the bank window title row. Deposit Inv empties the inventory; Deposit Worn unequips everything, reopens the bank (the game closes it on unequip), and deposits it.'
         });
         this.enabled = ctx.config.getBool(KEY);
         ctx.config.onChange(KEY, (): void => {
@@ -124,7 +175,7 @@ class BankDepositPlugin {
 
     private findWindow(com: IfType, x: number, y: number): { x: number; y: number } | null {
         const children: number[] = com.children!;
-        for (let i = 0; i < children.length; i++) {
+        for (let i: number = 0; i < children.length; i++) {
             if (children[i] === BANK_WINDOW_ID) {
                 return { x: x + (com.childX?.[i] ?? 0), y: y + (com.childY?.[i] ?? 0) };
             }
@@ -162,8 +213,8 @@ class BankDepositPlugin {
 
     /** Phase 1: burst "Remove" over every occupied worn slot. */
     private depositWorn(ctx: QolContext): void {
-        if (this.pendingDepositAt > 0) {
-            return; // phase 2 already in flight
+        if (this.wornPhase !== PHASE_IDLE) {
+            return; // a reopen is already in flight
         }
         const client = ctx.client;
         const com = IfType.list[WORN_INV_ID];
@@ -180,20 +231,133 @@ class BankDepositPlugin {
         if (removed === 0) {
             return;
         }
-        this.pendingDepositAt = ctx.nowMs() + SETTLE_MS;
-        console.log(`[qol] bank: unequipped ${removed} worn slot(s), depositing after settle`);
+        this.wornPhase = PHASE_PENDING_REOPEN;
+        this.wornPhaseAt = ctx.nowMs() + WORN_REOPEN_DELAY_MS;
+        console.log(`[qol] bank: unequipped ${removed} worn slot(s), reopening the bank after the game's if_close`);
     }
 
-    /** Phase 2 catch: fire the deposit burst once the settle window elapses. */
+    /**
+     * Find the nearest thing that opens the bank: a bank chest/booth within
+     * BANK_CHEST_SCAN_RADIUS tiles (OPLOC2 — bank_booth.rs2's oploc2 goes
+     * straight to @openbank, skipping the banker dialogue; OPLOC1 falls back
+     * when there is no second option), else a banker NPC within
+     * BANKER_SCAN_RADIUS tiles (OPNPC3 — banker.rs2's apnpc3 → @openbank).
+     */
+    private findBankReopenTarget(ctx: QolContext): BankTarget | null {
+        const client = ctx.client;
+        const world: any = client.world;
+        const local = ctx.localPlayer();
+        if (!world || !local) {
+            return null;
+        }
+        const baseX: number = client.mapBuildBaseX;
+        const baseZ: number = client.mapBuildBaseZ;
+        const centerX: number = local.x >> 7;
+        const centerZ: number = local.z >> 7;
+
+        let best: BankTarget | null = null;
+        let bestDist: number = Infinity;
+        for (let dz: number = -BANK_CHEST_SCAN_RADIUS; dz <= BANK_CHEST_SCAN_RADIUS; dz++) {
+            for (let dx: number = -BANK_CHEST_SCAN_RADIUS; dx <= BANK_CHEST_SCAN_RADIUS; dx++) {
+                const tx: number = centerX + dx;
+                const tz: number = centerZ + dz;
+                const sprite = world.getScene(local.level, tx, tz);
+                if (!sprite) {
+                    continue;
+                }
+                const locId: number = (sprite.typecode >> 14) & 0x7fff;
+                let loc: LocType | undefined;
+                try {
+                    loc = LocType.list(locId);
+                } catch {
+                    continue;
+                }
+                if (!loc || !loc.name || !/bank (booth|chest)/i.test(loc.name)) {
+                    continue;
+                }
+                if (!loc.op) {
+                    continue;
+                }
+                const opIndex: number = loc.op[1] ? 2 : loc.op[0] ? 1 : 0;
+                if (opIndex === 0) {
+                    continue;
+                }
+                const dist: number = dx * dx + dz * dz;
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = { kind: 'loc', worldX: baseX + tx, worldZ: baseZ + tz, id: locId, opIndex };
+                }
+            }
+        }
+        if (best) {
+            return best;
+        }
+
+        // Fallback: a banker NPC standing near (banks that are teller-only).
+        for (const entry of ctx.npcs()) {
+            const name: string | null = entry.npc.type?.name ?? null;
+            if (!name || !/banker/i.test(name)) {
+                continue;
+            }
+            const dx: number = (entry.npc.x >> 7) - centerX;
+            const dz: number = (entry.npc.z >> 7) - centerZ;
+            const dist: number = dx * dx + dz * dz;
+            if (dist <= BANKER_SCAN_RADIUS * BANKER_SCAN_RADIUS && dist < bestDist) {
+                bestDist = dist;
+                best = { kind: 'npc', worldX: 0, worldZ: 0, id: entry.index, opIndex: 3 };
+            }
+        }
+        return best;
+    }
+
+    /** Fire the deposit burst once the reopen window elapses. */
     private tick(ctx: QolContext): void {
-        if (this.pendingDepositAt === 0 || ctx.nowMs() < this.pendingDepositAt) {
+        if (this.wornPhase === PHASE_PENDING_REOPEN) {
+            if (ctx.nowMs() < this.wornPhaseAt) {
+                return;
+            }
+            this.wornPhaseAt = 0;
+            // Edge: the bank never closed (if_close is unconditional, so this
+            // should not happen) — the items are in the inventory, just deposit.
+            if (!ctx.isBankOpen()) {
+                const target = this.findBankReopenTarget(ctx);
+                if (!target) {
+                    console.log('[qol] bank: no bank chest/booth or banker nearby to reopen — the unequipped items are in your inventory');
+                    this.wornPhase = PHASE_IDLE;
+                    return;
+                }
+                const result =
+                    target.kind === 'loc'
+                        ? ctx.client.interactLoc(target.worldX, target.worldZ, target.id, target.opIndex)
+                        : ctx.client.interactNpc(target.id, target.opIndex);
+                if (!result || result.success !== true) {
+                    console.log(`[qol] bank: reopen interact failed (${result?.reason ?? 'unknown'}) — the unequipped items are in your inventory`);
+                    this.wornPhase = PHASE_IDLE;
+                    return;
+                }
+                console.log(`[qol] bank: reopening the bank via ${target.kind} ${target.id} (op ${target.opIndex})`);
+            }
+            this.wornPhase = PHASE_AWAITING_BANK;
+            this.wornPhaseAt = ctx.nowMs() + WORN_REOPEN_TIMEOUT_MS;
+            this.bankOpenedAt = 0;
             return;
         }
-        this.pendingDepositAt = 0;
-        if (!ctx.isBankOpen()) {
-            return; // bank closed during the settle — the unequip already landed
+
+        if (this.wornPhase === PHASE_AWAITING_BANK) {
+            if (ctx.isBankOpen()) {
+                if (this.bankOpenedAt === 0) {
+                    this.bankOpenedAt = ctx.nowMs();
+                }
+                if (ctx.nowMs() - this.bankOpenedAt >= WORN_DEPOSIT_DELAY_MS) {
+                    this.depositInventory(ctx);
+                    this.wornPhase = PHASE_IDLE;
+                    this.bankOpenedAt = 0;
+                }
+            } else if (ctx.nowMs() >= this.wornPhaseAt) {
+                console.log('[qol] bank: the bank did not reopen in time — the unequipped items are in your inventory');
+                this.wornPhase = PHASE_IDLE;
+            }
         }
-        this.depositInventory(ctx);
     }
 
     // ---- click ----

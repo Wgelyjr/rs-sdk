@@ -40,7 +40,7 @@ import ObjType from '#/config/ObjType.js';
 import { MiniMenuAction } from '#/client/MiniMenuAction.js';
 
 import type { QolContext } from '#/client/qol/QolContext.js';
-import type { QolMenuView } from '#/client/qol/QolHooks.js';
+import type { QolClickEvent, QolMenuView } from '#/client/qol/QolHooks.js';
 
 /** Setting keys (plan §3, Menu section). */
 const KEY_SHIFT_DROP: string = 'menu.shiftDrop';
@@ -344,6 +344,12 @@ export default {
         let excludeSource: string | null = null;
         let exclude: RegExp[] = [];
 
+        // Whether the currently built menu was built while Shift was held.
+        // The client only rebuilds the minimenu on mouse movement, so a click
+        // at a stationary cursor would execute the last hover-time build —
+        // the click hook below refreshes the menu when Shift has flipped.
+        let buildShift: boolean = false;
+
         ctx.config.onChange(KEY_SWAP_RULES, () => {
             rulesSource = null;
         });
@@ -352,6 +358,7 @@ export default {
         });
 
         ctx.hooks.onMenuBuilt((menu: QolMenuView): void => {
+            buildShift = ctx.shiftHeld();
             if (menu.count <= 1) {
                 return; // just 'Cancel' — nothing to reorder
             }
@@ -384,5 +391,22 @@ export default {
                 promoteShiftDrop(menu, ctx, exclude);
             }
         }, 'MenuSwapper.menuBuilt');
+
+        // F1: the menu a left click executes was built on the LAST mouse
+        // movement, which may predate Shift being held (or its release) — the
+        // typical gesture (hover, hold Shift, click in place) hits a stale,
+        // un-promoted menu. When the Shift state has flipped since that build,
+        // refresh the menu here: the re-dispatched menuBuilt promotes (or
+        // un-promotes) the Drop entry before the vanilla routing that follows
+        // runs doAction on the top entry (mouseLoop directly, or the
+        // drag-release path for inventory-style grids). Never consumes — the
+        // click still routes through the vanilla handlers.
+        ctx.hooks.onClick((e: QolClickEvent): boolean => {
+            if (e.button !== 1 || e.shift === buildShift) {
+                return false;
+            }
+            ctx.rebuildMenu();
+            return false;
+        }, 'MenuSwapper.shiftRefresh', 1000);
     }
 };
