@@ -49,7 +49,27 @@ const CLICK_PRIORITY: number = 5000;
 const MARKER_FILL_ALPHA: number = 90;
 const MARKER_LINE_ALPHA: number = 224;
 
-/** One merged ground-item stack label (scratch object, reused across frames). */
+/** Max item lines drawn per tile; extras collapse into '+N more'. */
+const GROUND_LABEL_MAX_LINES: number = 4;
+/** Distinct item ids tracked per tile (scratch cap; drawn lines = the
+ *  most valuable GROUND_LABEL_MAX_LINES of them). */
+const GROUND_LABEL_MAX_TRACK: number = 8;
+/** Line height (px) between item lines of one tile label (p12). */
+const GROUND_LABEL_LINE_H: number = 12;
+
+/** One line of a tile label: a single item id's merged stacks (scratch). */
+interface GroundLabelLine {
+    /** Item id this line merges (for the within-tile merge). */
+    id: number;
+    name: string;
+    /** Merged count over every stack of that id on the tile. */
+    count: number;
+    /** Merged `cost * count` value (within-tile sort key, most valuable first). */
+    value: number;
+}
+
+/** One merged ground-item tile label (scratch object, reused across frames).
+ *  Lists EVERY item id on the tile (merged by id), most valuable first. */
 interface GroundLabel {
     /** Absolute world tile x. */
     worldX: number;
@@ -59,12 +79,12 @@ interface GroundLabel {
     dist: number;
     /** Total stack value: sum of `ObjType.cost * count` over the tile. */
     value: number;
-    /** Value of the single most valuable item (`cost * count`), the label item. */
-    bestVal: number;
-    /** Name of the most valuable item in the stack. */
-    bestName: string;
-    /** Count of that item. */
-    bestCount: number;
+    /** Distinct item ids on the tile this frame (before the track cap). */
+    distinct: number;
+    /** Filled lines in `lines`; sorted most-valuable-first before draw. */
+    lineCount: number;
+    /** Preallocated line slots (GROUND_LABEL_MAX_TRACK), reused across frames. */
+    lines: GroundLabelLine[];
 }
 
 /** One marked tile (world coordinates, persisted). */
@@ -304,9 +324,8 @@ class WorldOverlaysImpl {
                 const ddz: number = label.worldZ - localTileZ;
                 label.dist = ddx * ddx + ddz * ddz;
                 label.value = 0;
-                label.bestVal = -1;
-                label.bestName = '';
-                label.bestCount = 1;
+                label.distinct = 0;
+                label.lineCount = 0;
                 this.visibleLabels.push(label);
             }
             const label = this.visibleLabels[this.visibleLabels.length - 1];
@@ -320,10 +339,28 @@ class WorldOverlaysImpl {
             const count: number = e.count > 0 ? e.count : 1;
             const val: number = cost * count;
             label.value += val;
-            if (val > label.bestVal) {
-                label.bestVal = val;
-                label.bestName = type.name ?? `obj_${e.id}`;
-                label.bestCount = count;
+            // Merge this stack into the tile's per-id line list: same id sums
+            // into its existing line, a new id takes a free slot (up to the
+            // track cap — past that only the distinct count grows).
+            let line: GroundLabelLine | null = null;
+            for (let li: number = 0; li < label.lineCount; li++) {
+                if (label.lines[li].id === e.id) {
+                    line = label.lines[li];
+                    break;
+                }
+            }
+            if (line !== null) {
+                line.count += count;
+                line.value += val;
+            } else {
+                label.distinct++;
+                if (label.lineCount < GROUND_LABEL_MAX_TRACK) {
+                    line = label.lines[label.lineCount++];
+                    line.id = e.id;
+                    line.name = type.name ?? `obj_${e.id}`;
+                    line.count = count;
+                    line.value = val;
+                }
             }
         }
 
@@ -332,6 +369,24 @@ class WorldOverlaysImpl {
             return;
         }
         labels.sort(this.labelCompare);
+        // Within-tile: most valuable item first, so a full tile shows its best
+        // lines and the '+N more' tail is the least valuable remainder.
+        // Bounded insertion sort over the filled prefix only (n ≤ 8): the
+        // preallocated slots past lineCount hold last-frame values, so a full
+        // Array.sort would let a stale slot float into the drawn prefix.
+        for (let i: number = 0; i < labels.length; i++) {
+            const lines = labels[i].lines;
+            const n: number = labels[i].lineCount;
+            for (let a: number = 1; a < n; a++) {
+                const cur = lines[a];
+                let b: number = a - 1;
+                while (b >= 0 && lines[b].value < cur.value) {
+                    lines[b + 1] = lines[b];
+                    b--;
+                }
+                lines[b + 1] = cur;
+            }
+        }
 
         const cfg = this.ctx.config;
         const minValue: number = cfg.getNum('skilling.groundItemMinValue');
@@ -359,8 +414,21 @@ class WorldOverlaysImpl {
             const v: number = label.value;
             const color: number =
                 v >= TIER_4 ? color4 : v >= TIER_3 ? color3 : v >= TIER_2 ? color2 : v >= TIER_1 ? color1 : COLOR_WHITE;
-            const text: string = showCount && label.bestCount > 1 ? `${label.bestName} x${label.bestCount}` : label.bestName;
-            g.centreText(font, text, x, y - 10, color, true);
+
+            // One line per item on the tile (most valuable first), stacked
+            // bottom-up so the last line keeps the tile-anchored y-10 slot.
+            const lineTotal: number = Math.min(label.lineCount, GROUND_LABEL_MAX_LINES);
+            const overflow: number = label.distinct - lineTotal;
+            let ty: number = y - 10 - (lineTotal - 1) * GROUND_LABEL_LINE_H - (overflow > 0 ? GROUND_LABEL_LINE_H : 0);
+            for (let li: number = 0; li < lineTotal; li++) {
+                const line = label.lines[li];
+                const text: string = showCount && line.count > 1 ? `${line.name} x${line.count}` : line.name;
+                g.centreText(font, text, x, ty, color, true);
+                ty += GROUND_LABEL_LINE_H;
+            }
+            if (overflow > 0) {
+                g.centreText(font, `+${overflow} more`, x, ty, color, true);
+            }
             drawn++;
         }
     }
@@ -369,7 +437,11 @@ class WorldOverlaysImpl {
     private nextLabel(index: number): GroundLabel {
         let label = this.labelPool[index];
         if (label === undefined) {
-            label = { worldX: 0, worldZ: 0, dist: 0, value: 0, bestVal: 0, bestName: '', bestCount: 1 };
+            const lines: GroundLabelLine[] = [];
+            for (let i: number = 0; i < GROUND_LABEL_MAX_TRACK; i++) {
+                lines.push({ id: -1, name: '', count: 0, value: 0 });
+            }
+            label = { worldX: 0, worldZ: 0, dist: 0, value: 0, distinct: 0, lineCount: 0, lines };
             this.labelPool.push(label);
         }
         return label;

@@ -1,9 +1,11 @@
 // F3 XP drops + F4 XP tracker — wave 2, chunk C4 (docs/qol-features-plan.md §4).
 //
-// XP drops: floating '+N' texts in a right-aligned column at the right edge of
-// the 3D viewport (drawScene pass, viewport-local coords). New drops spawn at
-// the top and push older ones down; each drop holds its row and expires after
-// 2.5s with a stipple fade over its last 300ms (PixFont has no alpha).
+// XP drops: floating '+N <Skill>' texts in a right-aligned column at the right
+// edge of the 3D viewport (drawScene pass, viewport-local coords). The skill
+// name rides to the LEFT of the gain in a dimmed color so several skills
+// gaining in one window stay distinguishable. New drops spawn at the top and
+// push older ones down; each drop holds its row and expires after 2.5s with a
+// stipple fade over its last 300ms (PixFont has no alpha).
 //
 // XP tracker: session-scoped per-skill panel (drawTop pass) with XP gained,
 // XP/hour and actions/hour over a rolling 5-minute window (session-rate
@@ -79,6 +81,10 @@ const COL_TTL: number = 0xc0c0c0;
 const COL_BOOSTED: number = 0x00ff00;
 const COL_DRAINED: number = 0xff4040;
 const COL_BASE: number = 0xff9040;
+/** Dimmed skill name riding left of the gain number. */
+const COL_DROP_SKILL: number = 0xc0c0c0;
+/** Gap between the skill name and the gain number. */
+const DROP_SKILL_GAP: number = 4;
 
 /** Per-size drop metrics: font key + row height. */
 interface DropStyle {
@@ -95,6 +101,8 @@ const STYLE_LARGE: DropStyle = { fontKey: 'b12', rowHeight: 18, textHeight: 15 }
 interface XpDrop {
     live: boolean;
     text: string;
+    /** Skill name for this gain ('' when the skill could not be resolved). */
+    skillText: string;
     y: number;
     bornMs: number;
     color: number;
@@ -176,7 +184,7 @@ class XpDropsPlugin {
         this.ctx = ctx;
 
         for (let i = 0; i < MAX_DROPS; i++) {
-            this.drops.push({ live: false, text: '', y: 0, bornMs: 0, color: 0xffffff, font: null, textHeight: 12 });
+            this.drops.push({ live: false, text: '', skillText: '', y: 0, bornMs: 0, color: 0xffffff, font: null, textHeight: 12 });
         }
         for (let i = 0; i < TRACKER_MAX_ROWS; i++) {
             this.rowText.push({ name: '', gain: '', rate: '', act: '', ttl: '' });
@@ -192,7 +200,7 @@ class XpDropsPlugin {
             label: 'XP drops',
             type: 'boolean',
             default: true,
-            tooltip: 'Floating +XP numbers at the right edge of the viewport, RuneLite style.'
+            tooltip: 'Floating +XP numbers at the right edge of the viewport, each labelled with the skill gaining.'
         });
         config.define({
             key: 'skilling.xpDropSize',
@@ -275,7 +283,7 @@ class XpDropsPlugin {
         const now: number = this.ctx.nowMs();
 
         if (this.dropsOn) {
-            this.spawnDrop('+' + delta.toLocaleString('en-US'), now);
+            this.spawnDrop('+' + delta.toLocaleString('en-US'), this.ctx.skillName(e.skill), now);
         }
 
         if (this.trackerOn) {
@@ -283,7 +291,7 @@ class XpDropsPlugin {
         }
     }
 
-    private spawnDrop(text: string, now: number): void {
+    private spawnDrop(text: string, skillText: string, now: number): void {
         const fonts = this.ctx.fonts();
         const font: PixFont = fonts[this.style.fontKey];
 
@@ -316,6 +324,7 @@ class XpDropsPlugin {
 
         slot.live = true;
         slot.text = text;
+        slot.skillText = skillText;
         slot.y = DROP_FIRST_Y;
         slot.bornMs = now;
         slot.color = this.dropColor;
@@ -513,13 +522,18 @@ class XpDropsPlugin {
 
             const rise: number = ((age / 1000) * DROP_RISE_PX_S) | 0;
             const y: number = d.y - rise;
-            const x: number = DROP_RIGHT_X - g.textWidth(d.font, d.text);
+            const numW: number = g.textWidth(d.font, d.text);
+            const skillW: number = d.skillText === '' ? 0 : g.textWidth(d.font, d.skillText) + DROP_SKILL_GAP;
+            const x: number = DROP_RIGHT_X - numW - skillW;
 
-            g.text(d.font, d.text, x, y, d.color, true);
+            if (skillW > 0) {
+                g.text(d.font, d.skillText, x, y, COL_DROP_SKILL, true);
+            }
+            g.text(d.font, d.text, x + skillW, y, d.color, true);
 
             // Stipple fade over the last DROP_FADE_MS (PixFont has no alpha).
             if (age >= DROP_LIFE_MS - DROP_FADE_MS) {
-                g.fillStipple(x - 1, y - d.textHeight, g.textWidth(d.font, d.text) + 2, d.textHeight + 3, COL_BG);
+                g.fillStipple(x - 1, y - d.textHeight, numW + skillW + 2, d.textHeight + 3, COL_BG);
             }
         }
     }

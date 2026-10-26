@@ -12,7 +12,6 @@ import Display from './Display.js';
 import InfoOverlays from './InfoOverlays.js';
 import WorldOverlays from './WorldOverlays.js';
 import DialogKeys from './DialogKeys.js';
-import BankPlaceholders from './BankPlaceholders.js';
 import BankTabs from './BankTabs.js';
 import BankDeposit from './BankDeposit.js';
 import BottomBar from './BottomBar.js';
@@ -26,7 +25,6 @@ export const qolPlugins: ReadonlyArray<{ name: string; register(ctx: QolContext)
     InfoOverlays,
     WorldOverlays,
     DialogKeys,
-    BankPlaceholders,
     BankTabs,
     BankDeposit,
     BottomBar
