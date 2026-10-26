@@ -17,12 +17,16 @@
 /** One managed widget. */
 export interface QolDomWidget {
     readonly el: HTMLDivElement;
+    /** Stable id for position persistence ('' = not persisted/draggable). */
+    readonly id: string;
     /** Buffer-space anchor (765x503 coords); may be outside for docks. */
     x: number;
     y: number;
     /** When true the widget prefers docking outside the canvas (right side). */
     dockOutside: boolean;
     visible: boolean;
+    /** True while the user is dragging; layout() leaves the widget alone. */
+    dragging: boolean;
 }
 
 const CONTAINER_ID = 'qol-dom-layer';
@@ -36,8 +40,127 @@ export class QolDom {
     private scaleX = 1;
     private scaleY = 1;
     private rectDirty = true;
+    private drag: { w: QolDomWidget; startX: number; startY: number; offX: number; offY: number; active: boolean } | null = null;
     private readonly onMove = (): void => {
         this.rectDirty = true;
+    };
+
+    private static readonly POS_KEY = 'rs-qol-dompos-v1';
+
+    private static readPos(id: string): { x: number; y: number } | null {
+        try {
+            const raw = window.localStorage.getItem(QolDom.POS_KEY);
+            if (raw === null) {
+                return null;
+            }
+            const all = JSON.parse(raw) as Record<string, unknown>;
+            const p = all[id] as { x?: unknown; y?: unknown } | undefined;
+            if (p !== undefined && typeof p.x === 'number' && typeof p.y === 'number' && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+                return { x: p.x, y: p.y };
+            }
+            return null;
+        } catch {
+            return null;
+        }
+    }
+
+    private static savePos(id: string, x: number, y: number): void {
+        try {
+            let all: Record<string, unknown> = {};
+            const raw = window.localStorage.getItem(QolDom.POS_KEY);
+            if (raw !== null) {
+                const parsed: unknown = JSON.parse(raw);
+                if (parsed !== null && typeof parsed === 'object') {
+                    all = parsed as Record<string, unknown>;
+                }
+            }
+            all[id] = { x, y };
+            window.localStorage.setItem(QolDom.POS_KEY, JSON.stringify(all));
+        } catch {
+            // storage unavailable - the drag still works for this session
+        }
+    }
+
+    private widgetById(id: string): QolDomWidget | null {
+        for (let i = 0; i < this.widgets.length; i++) {
+            if (this.widgets[i].id === id) {
+                return this.widgets[i];
+            }
+        }
+        return null;
+    }
+
+    private refreshRect(): void {
+        if (this.canvas === null) {
+            return;
+        }
+        const r = this.canvas.getBoundingClientRect();
+        this.rectLeft = r.left;
+        this.rectTop = r.top;
+        this.scaleX = r.width / 765;
+        this.scaleY = r.height / 503;
+        this.rectDirty = false;
+    }
+
+    private startDrag(id: string, ev: MouseEvent): void {
+        const w = this.widgetById(id);
+        if (w === null || !w.visible || this.drag !== null) {
+            return;
+        }
+        ev.preventDefault();
+        this.drag = { w, startX: ev.clientX, startY: ev.clientY, offX: 0, offY: 0, active: false };
+        window.addEventListener('mousemove', this.onDragMove);
+        window.addEventListener('mouseup', this.onDragEnd);
+    }
+
+    private readonly onDragMove = (ev: MouseEvent): void => {
+        const d = this.drag;
+        if (d === null) {
+            return;
+        }
+        if (!d.active) {
+            // Sub-threshold motion is still a click, not a drag.
+            if (Math.abs(ev.clientX - d.startX) < 4 && Math.abs(ev.clientY - d.startY) < 4) {
+                return;
+            }
+            d.active = true;
+            d.w.dragging = true;
+            this.refreshRect();
+            d.offX = d.w.el.offsetLeft - ev.clientX;
+            d.offY = d.w.el.offsetTop - ev.clientY;
+        }
+        ev.preventDefault();
+        d.w.el.style.left = (ev.clientX + d.offX).toFixed(1) + 'px';
+        d.w.el.style.top = (ev.clientY + d.offY).toFixed(1) + 'px';
+    };
+
+    private readonly onDragEnd = (): void => {
+        window.removeEventListener('mousemove', this.onDragMove);
+        window.removeEventListener('mouseup', this.onDragEnd);
+        const d = this.drag;
+        this.drag = null;
+        if (d === null || !d.active) {
+            return; // plain click: let the event through untouched
+        }
+        const w = d.w;
+        w.dragging = false;
+        // Clamp inside the viewport, then convert page px -> buffer coords.
+        this.refreshRect();
+        const left = Math.min(Math.max(0, w.el.offsetLeft), Math.max(0, window.innerWidth - w.el.offsetWidth));
+        const top = Math.min(Math.max(0, w.el.offsetTop), Math.max(0, window.innerHeight - w.el.offsetHeight));
+        w.el.style.left = left.toFixed(1) + 'px';
+        w.el.style.top = top.toFixed(1) + 'px';
+        w.x = Math.round((left - this.rectLeft) / this.scaleX);
+        w.y = Math.round((top - this.rectTop) / this.scaleY);
+        w.dockOutside = false;
+        QolDom.savePos(w.id, w.x, w.y);
+        // The browser fires a click for the mousedown that ended the drag;
+        // swallow it once (capture phase) so an orb tab-switch or a panel's
+        // collapse toggle doesn't fire from the drop.
+        document.addEventListener('click', (e: Event) => {
+            e.stopPropagation();
+            e.preventDefault();
+        }, { capture: true, once: true });
     };
 
     /** Attach to the game canvas. No-op outside a browser. */
@@ -70,6 +193,12 @@ export class QolDom {
         if (typeof window !== 'undefined') {
             window.removeEventListener('resize', this.onMove);
             window.removeEventListener('scroll', this.onMove, true);
+            if (this.drag !== null) {
+                window.removeEventListener('mousemove', this.onDragMove);
+                window.removeEventListener('mouseup', this.onDragEnd);
+                this.drag.w.dragging = false;
+                this.drag = null;
+            }
         }
         if (this.container !== null && this.container.parentNode !== null) {
             this.container.parentNode.removeChild(this.container);
@@ -83,10 +212,21 @@ export class QolDom {
      * @param clickable when true the widget receives pointer events (the
      *   container is `pointer-events: none`, so without this a widget's click
      *   listeners never fire — e.g. the XP tracker's collapse toggle)
+     * @param id stable widget id ('orbs', 'stat-timers', ...). When set, the
+     *   widget is draggable and its dropped position survives reloads.
      */
-    create(html: string, x: number, y: number, dockOutside: boolean = false, clickable: boolean = false): QolDomWidget | null {
+    create(html: string, x: number, y: number, dockOutside: boolean = false, clickable: boolean = false, id: string = ''): QolDomWidget | null {
         if (this.container === null) {
             return null;
+        }
+        // A user-dropped position wins over the default anchor/dock.
+        if (id !== '') {
+            const saved = QolDom.readPos(id);
+            if (saved !== null) {
+                x = saved.x;
+                y = saved.y;
+                dockOutside = false;
+            }
         }
         const el = document.createElement('div');
         el.style.position = 'absolute';
@@ -96,8 +236,11 @@ export class QolDom {
         // widget shrink-fits to ~0 and its text wraps one word per line.
         el.style.width = 'max-content';
         el.innerHTML = html;
+        if (id !== '') {
+            el.addEventListener('mousedown', (ev: MouseEvent) => this.startDrag(id, ev));
+        }
         this.container.appendChild(el);
-        const w: QolDomWidget = { el, x, y, dockOutside, visible: false };
+        const w: QolDomWidget = { el, id, x, y, dockOutside, visible: false, dragging: false };
         this.widgets.push(w);
         this.rectDirty = true;
         return w;
@@ -127,12 +270,7 @@ export class QolDom {
             return;
         }
         if (this.rectDirty) {
-            const r = this.canvas.getBoundingClientRect();
-            this.rectLeft = r.left;
-            this.rectTop = r.top;
-            this.scaleX = r.width / 765;
-            this.scaleY = r.height / 503;
-            this.rectDirty = false;
+            this.refreshRect();
         }
 
         const winW = typeof window !== 'undefined' ? window.innerWidth : 765;
@@ -146,7 +284,7 @@ export class QolDom {
 
         for (let i = 0; i < this.widgets.length; i++) {
             const w = this.widgets[i];
-            if (!w.visible) {
+            if (!w.visible || w.dragging) {
                 continue;
             }
             let left: number;

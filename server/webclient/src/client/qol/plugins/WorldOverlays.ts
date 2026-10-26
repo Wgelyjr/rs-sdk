@@ -1,4 +1,5 @@
-// Ground item labels (F6), entity hider (F10) and tile markers (F13).
+// Ground item labels (F6, incl. the hold-Alt categorical hide lens),
+// entity hider (F10) and tile markers (F13).
 // docs/qol-features-plan.md §4, §7. Chunk C8; owns this file only.
 //
 // Projection note (IMPORTANT): `Client.projectTileToScreen` — and therefore
@@ -56,12 +57,24 @@ const GROUND_LABEL_MAX_LINES: number = 4;
 const GROUND_LABEL_MAX_TRACK: number = 8;
 /** Line height (px) between item lines of one tile label (p12). */
 const GROUND_LABEL_LINE_H: number = 12;
+/** Max hidden ground item categories; the oldest entry is evicted past this. */
+const HIDDEN_CAT_CAP: number = 200;
+/** localStorage key: JSON array of lowercased item names, in hide order. */
+const HIDDEN_STORAGE_KEY: string = 'rs-qol-hidden-ground-v1';
+/** Click-hook priority for the Alt ground-hide lens (above tileMark's 5000). */
+const HIDE_CLICK_PRIORITY: number = 6000;
+/** Dim color for hidden lines in the Alt-management lens. */
+const HIDDEN_DIM: number = 0x808080;
 
 /** One line of a tile label: a single item id's merged stacks (scratch). */
 interface GroundLabelLine {
     /** Item id this line merges (for the within-tile merge). */
     id: number;
     name: string;
+    /** Hide category key: `name.trim().toLowerCase()` (set with the name). */
+    cat: string;
+    /** True while `cat` is in the hidden set (line renders dimmed in the lens). */
+    hidden: boolean;
     /** Merged count over every stack of that id on the tile. */
     count: number;
     /** Merged `cost * count` value (within-tile sort key, most valuable first). */
@@ -94,6 +107,17 @@ interface TileMark {
     z: number;
 }
 
+/** One label line's click rect in the Alt-management lens (pooled, scratch).
+ *  `cat` holds the category string of the line that was drawn this frame, so
+ *  a click landing between frames still toggles the right item. */
+interface GroundHideRect {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    cat: string;
+}
+
 /** Plugin implementation: owns the scratch state and the hook handlers. */
 class WorldOverlaysImpl {
     /** Pool of label scratch objects, indexed by slot (never shrinks). */
@@ -104,6 +128,15 @@ class WorldOverlaysImpl {
     private readonly markers: TileMark[] = [];
     /** `'level:x:z'` lookup for O(1) toggling. */
     private readonly markerKeys: Set<string> = new Set();
+
+    /** Hidden ground item categories (lowercased names, F6 lens). */
+    private readonly hiddenCats: Set<string> = new Set();
+    /** Insertion order of `hiddenCats` for oldest-first eviction. */
+    private readonly hiddenOrder: string[] = [];
+    /** Pooled line hit rects for the Alt lens; valid for one drawn frame. */
+    private readonly hideRects: GroundHideRect[] = WorldOverlaysImpl.hideRectPool();
+    /** Hit rects recorded by the last drawLabels pass (0 when not in the lens). */
+    private hideRectCount: number = 0;
 
     /** Corner projections for the tile diamond fill/outline (reused). */
     private readonly cornerX: number[] = [0, 0, 0, 0];
@@ -121,6 +154,15 @@ class WorldOverlaysImpl {
     /** Reused sort comparator — never allocate one per frame. */
     private readonly labelCompare = (a: GroundLabel, b: GroundLabel): number => a.dist - b.dist;
 
+    /** Preallocate the full hit-rect pool (LABEL_CAP lines × 5 lines per tile). */
+    private static hideRectPool(): GroundHideRect[] {
+        const out: GroundHideRect[] = [];
+        for (let i: number = 0; i < LABEL_CAP * (GROUND_LABEL_MAX_LINES + 1); i++) {
+            out.push({ x: 0, y: 0, w: 0, h: 0, cat: '' });
+        }
+        return out;
+    }
+
     constructor(private readonly ctx: QolContext) {}
 
     /** Register settings, hooks, persistence and the chat commands. */
@@ -130,6 +172,9 @@ class WorldOverlaysImpl {
         const hooks = this.ctx.hooks;
         hooks.onDrawScene((g: QolGraphics): void => this.drawScene(g), 'WorldOverlays.drawScene');
         hooks.onClick((e: QolClickEvent): boolean => this.handleClick(e), 'WorldOverlays.tileMark', CLICK_PRIORITY);
+        // The Alt lens runs before tileMark (higher priority) though the two
+        // gates (button 1 + Alt vs button 2 + Shift) never overlap.
+        hooks.onClick((e: QolClickEvent): boolean => this.handleHideClick(e), 'WorldOverlays.groundHide', HIDE_CLICK_PRIORITY);
 
         // F10 entity hider: pure config passthrough. `() => boolean` is a valid
         // filter handler; nothing is allocated per call beyond the Map lookup.
@@ -145,8 +190,11 @@ class WorldOverlaysImpl {
         // are separate commands: `::tilemark` lists, `::tilemarkclear` clears.
         this.ctx.chatCommand('tilemark', (): void => this.reportMarkers());
         this.ctx.chatCommand('tilemarkclear', (): void => this.clearMarkers());
+        this.ctx.chatCommand('groundhide', (): void => this.reportHidden());
+        this.ctx.chatCommand('groundhideclear', (): void => this.clearHidden());
 
         this.loadMarkers();
+        this.loadHidden();
     }
 
     // ---- settings ----
@@ -180,6 +228,17 @@ class WorldOverlaysImpl {
             type: 'boolean',
             default: true,
             tooltip: 'Append xCount to labels when a stack holds more than one item.'
+        });
+        cfg.define({
+            key: 'skilling.groundItemHideMode',
+            section: 'Skilling',
+            label: 'Hold-Alt ground hide',
+            type: 'boolean',
+            default: true,
+            tooltip:
+                'Hold Alt to manage hidden ground item categories: every label shows [-] (visible) or a ' +
+                'dimmed [+]; click a label to hide or show that item everywhere. Persists across sessions. ' +
+                '::groundhide lists, ::groundhideclear clears.'
         });
         cfg.define({
             key: 'skilling.groundItemColor1',
@@ -268,6 +327,9 @@ class WorldOverlaysImpl {
     /** Draw tile markers then ground item labels (both viewport-local). */
     private drawScene(g: QolGraphics): void {
         const ctx = this.ctx;
+        // The lens hit rects are valid for exactly the frame that drew them;
+        // reset first so every early-return / gate-off path leaves them dead.
+        this.hideRectCount = 0;
         if (!ctx.ingame()) {
             return;
         }
@@ -301,6 +363,9 @@ class WorldOverlaysImpl {
         const baseZ: number = client.mapBuildBaseZ;
         const localTileX: number = baseX + (local.x >> 7);
         const localTileZ: number = baseZ + (local.z >> 7);
+        // Alt-management lens: hidden categories are collected (dimmed) so the
+        // player can click them back, and every line gets a toggle hit rect.
+        const manage: boolean = this.ctx.altHeld();
 
         // `groundItems()` walks level -> x -> z, so every object of one tile
         // arrives in a contiguous run: merge the runs without any key strings.
@@ -338,7 +403,6 @@ class WorldOverlaysImpl {
             const cost: number = type.cost > 0 ? type.cost : 1;
             const count: number = e.count > 0 ? e.count : 1;
             const val: number = cost * count;
-            label.value += val;
             // Merge this stack into the tile's per-id line list: same id sums
             // into its existing line, a new id takes a free slot (up to the
             // track cap — past that only the distinct count grows).
@@ -349,18 +413,34 @@ class WorldOverlaysImpl {
                     break;
                 }
             }
-            if (line !== null) {
-                line.count += count;
-                line.value += val;
-            } else {
+            if (line === null) {
+                // New id: resolve its hide category (lowercased name). A hidden
+                // category skips the stack entirely (value, lines, distinct)
+                // unless the Alt lens is up, in which case it is collected so
+                // the dimmed line can be clicked back.
+                const name: string = type.name ?? `obj_${e.id}`;
+                const cat: string = name.trim().toLowerCase();
+                const hidden: boolean = this.hiddenCats.has(cat);
+                if (hidden && !manage) {
+                    continue;
+                }
                 label.distinct++;
                 if (label.lineCount < GROUND_LABEL_MAX_TRACK) {
                     line = label.lines[label.lineCount++];
                     line.id = e.id;
-                    line.name = type.name ?? `obj_${e.id}`;
-                    line.count = count;
-                    line.value = val;
+                    line.name = name;
+                    line.cat = cat;
+                    line.hidden = hidden;
+                    line.count = 0;
+                    line.value = 0;
                 }
+            }
+            // Tile value sums every (non-hidden) stack, including ids past the
+            // track cap that get no line of their own (original F6 semantics).
+            label.value += val;
+            if (line !== null) {
+                line.count += count;
+                line.value += val;
             }
         }
 
@@ -400,6 +480,9 @@ class WorldOverlaysImpl {
         let drawn: number = 0;
         for (let i: number = 0; i < labels.length && drawn < LABEL_CAP; i++) {
             const label = labels[i];
+            if (label.lineCount === 0) {
+                continue; // every item on the tile is hidden: nothing to draw
+            }
             if (minValue > 0 && label.value < minValue) {
                 continue;
             }
@@ -412,7 +495,7 @@ class WorldOverlaysImpl {
                 continue;
             }
             const v: number = label.value;
-            const color: number =
+            const baseColor: number =
                 v >= TIER_4 ? color4 : v >= TIER_3 ? color3 : v >= TIER_2 ? color2 : v >= TIER_1 ? color1 : COLOR_WHITE;
 
             // One line per item on the tile (most valuable first), stacked
@@ -422,12 +505,32 @@ class WorldOverlaysImpl {
             let ty: number = y - 10 - (lineTotal - 1) * GROUND_LABEL_LINE_H - (overflow > 0 ? GROUND_LABEL_LINE_H : 0);
             for (let li: number = 0; li < lineTotal; li++) {
                 const line = label.lines[li];
-                const text: string = showCount && line.count > 1 ? `${line.name} x${line.count}` : line.name;
+                let text: string = showCount && line.count > 1 ? `${line.name} x${line.count}` : line.name;
+                let color: number = baseColor;
+                if (manage) {
+                    // Lens: [-] hides the category, dimmed [+] brings it back.
+                    if (line.hidden) {
+                        text += ' [+]';
+                        color = HIDDEN_DIM;
+                    } else {
+                        text += ' [-]';
+                    }
+                    // Whole-line click rect so the small glyph is easy to hit.
+                    if (this.hideRectCount < this.hideRects.length) {
+                        const tw: number = g.textWidth(font, text);
+                        const r = this.hideRects[this.hideRectCount++];
+                        r.x = x - (tw >> 1) - 3;
+                        r.y = ty - 11;
+                        r.w = tw + 6;
+                        r.h = 13;
+                        r.cat = line.cat;
+                    }
+                }
                 g.centreText(font, text, x, ty, color, true);
                 ty += GROUND_LABEL_LINE_H;
             }
             if (overflow > 0) {
-                g.centreText(font, `+${overflow} more`, x, ty, color, true);
+                g.centreText(font, `+${overflow} more`, x, ty, baseColor, true);
             }
             drawn++;
         }
@@ -439,7 +542,7 @@ class WorldOverlaysImpl {
         if (label === undefined) {
             const lines: GroundLabelLine[] = [];
             for (let i: number = 0; i < GROUND_LABEL_MAX_TRACK; i++) {
-                lines.push({ id: -1, name: '', count: 0, value: 0 });
+                lines.push({ id: -1, name: '', cat: '', hidden: false, count: 0, value: 0 });
             }
             label = { worldX: 0, worldZ: 0, dist: 0, value: 0, distinct: 0, lineCount: 0, lines };
             this.labelPool.push(label);
@@ -574,6 +677,56 @@ class WorldOverlaysImpl {
         return true;
     }
 
+    /** Alt+left-click a label line in the management lens: toggles its category. */
+    private handleHideClick(e: QolClickEvent): boolean {
+        const ctx = this.ctx;
+        if (e.button !== 1 || !e.alt || !ctx.config.getBool('skilling.groundItemHideMode')) {
+            return false;
+        }
+        // Viewport rect in full-frame coords (512x334 buffer at 4,4).
+        if (e.x < 4 || e.x > 516 || e.y < 4 || e.y > 338) {
+            return false;
+        }
+        const client: any = ctx.client;
+        if (!ctx.ingame() || client.mainModalId !== -1 || !client.localPlayer) {
+            return false;
+        }
+        const px: number = e.x - 4;
+        const py: number = e.y - 4;
+        for (let i: number = 0; i < this.hideRectCount; i++) {
+            const r = this.hideRects[i];
+            if (px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h) {
+                this.toggleCat(r.cat);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Toggle one category in the hidden set (oldest-first eviction at the cap). */
+    private toggleCat(cat: string): void {
+        if (cat === '') {
+            return;
+        }
+        if (this.hiddenCats.has(cat)) {
+            this.hiddenCats.delete(cat);
+            const oi: number = this.hiddenOrder.indexOf(cat);
+            if (oi !== -1) {
+                this.hiddenOrder.splice(oi, 1);
+            }
+        } else {
+            if (this.hiddenCats.size >= HIDDEN_CAT_CAP) {
+                const oldest: string | undefined = this.hiddenOrder.shift();
+                if (oldest !== undefined) {
+                    this.hiddenCats.delete(oldest);
+                }
+            }
+            this.hiddenCats.add(cat);
+            this.hiddenOrder.push(cat);
+        }
+        this.saveSoon();
+    }
+
     /**
      * Inverse projection of a full-frame click onto the rendered ground plane:
      * scan +/- `PICK_RADIUS` tiles around the local player for the projected
@@ -667,6 +820,46 @@ class WorldOverlaysImpl {
         }
     }
 
+    /** `::groundhide` — announce the hidden categories (first 10 + count). */
+    private reportHidden(): void {
+        const n: number = this.hiddenCats.size;
+        let msg: string;
+        if (n === 0) {
+            msg = 'No hidden ground item categories. Hold Alt over ground labels and click one to hide it.';
+        } else {
+            msg = `Hidden ground items: ${n}.`;
+            let shown: number = 0;
+            for (const cat of this.hiddenCats) {
+                if (shown >= 10) {
+                    msg += ', ...';
+                    break;
+                }
+                msg += (shown === 0 ? ' ' : ', ') + cat;
+                shown++;
+            }
+            msg += '. Hold Alt + click a label to toggle; ::groundhideclear removes all.';
+        }
+        const client: any = this.ctx.client;
+        try {
+            client.addChat(0, msg, '');
+        } catch (_e) {
+            console.warn('[qol] groundhide: no chat box', msg);
+        }
+    }
+
+    /** `::groundhideclear` — drop every hidden category and persist immediately. */
+    private clearHidden(): void {
+        this.hiddenCats.clear();
+        this.hiddenOrder.length = 0;
+        this.saveNow();
+        const client: any = this.ctx.client;
+        try {
+            client.addChat(0, 'Cleared all hidden ground item categories.', '');
+        } catch (_e) {
+            console.warn('[qol] groundhideclear: all hidden ground categories cleared');
+        }
+    }
+
     // ---- marker persistence (guarded DOM access, ground rule 3) ----
 
     /** Debounced localStorage write of the marker list. */
@@ -680,7 +873,8 @@ class WorldOverlaysImpl {
         }, MARKER_SAVE_DEBOUNCE_MS);
     }
 
-    /** Write `[[level, x, z], ...]` JSON to storage; quota/private-mode failures ignored. */
+    /** Write both persisted lists (markers + hidden ground categories) to
+     *  storage; quota/private-mode failures leave the values in memory. */
     private saveNow(): void {
         if (typeof window === 'undefined') {
             return;
@@ -694,6 +888,12 @@ class WorldOverlaysImpl {
             window.localStorage.setItem(MARKER_STORAGE_KEY, JSON.stringify(tuples));
         } catch (_e) {
             // Values stay in memory for this session.
+        }
+        try {
+            // hiddenOrder is the full set in insertion order: one write covers it.
+            window.localStorage.setItem(HIDDEN_STORAGE_KEY, JSON.stringify(this.hiddenOrder));
+        } catch (_e) {
+            // Categories stay in memory for this session.
         }
     }
 
@@ -739,6 +939,43 @@ class WorldOverlaysImpl {
             }
             this.markers.push({ level, x, z });
             this.markerKeys.add(key);
+        }
+    }
+
+    /** Restore hidden ground categories from storage (silently drops bad data). */
+    private loadHidden(): void {
+        if (typeof window === 'undefined') {
+            return;
+        }
+        let raw: string | null = null;
+        try {
+            raw = window.localStorage.getItem(HIDDEN_STORAGE_KEY);
+        } catch (_e) {
+            return;
+        }
+        if (raw === null) {
+            return;
+        }
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(raw);
+        } catch (_e) {
+            return;
+        }
+        if (!Array.isArray(parsed)) {
+            return;
+        }
+        for (const item of parsed) {
+            if (typeof item !== 'string' || item.length === 0 || item.length > 80) {
+                continue;
+            }
+            if (this.hiddenCats.size >= HIDDEN_CAT_CAP) {
+                break;
+            }
+            if (!this.hiddenCats.has(item)) {
+                this.hiddenCats.add(item);
+                this.hiddenOrder.push(item);
+            }
         }
     }
 }

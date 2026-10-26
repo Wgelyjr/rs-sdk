@@ -325,6 +325,17 @@ export class Client extends GameShell {
     private mapscene: (Pix8 | null)[] = new TypedArray1d(50, null);
     private mapfunction: (Pix32 | null)[] = new TypedArray1d(50, null);
     private hitmarks: (Pix32 | null)[] = new TypedArray1d(20, null);
+    // qol: two-pass hitsplat buffer. entityOverlays() draws per entity in id
+    // order, and each entity's health bar (anchored at height+15) is painted
+    // after the previous entity's hitsplats (anchored at height/2) — at full
+    // overhead pitch the two anchors converge, so a later entity's bar hides
+    // an earlier one's splat. Splats are recorded during the entity loop and
+    // painted after it (before the chat pass), so they beat every bar.
+    private splatCount: number = 0;
+    private readonly splatX: Int32Array = new Int32Array(64);
+    private readonly splatY: Int32Array = new Int32Array(64);
+    private readonly splatType: Int32Array = new Int32Array(64);
+    private readonly splatValue: Int32Array = new Int32Array(64);
     private headicons: (Pix32 | null)[] = new TypedArray1d(20, null);
     private mapmarker1: Pix32 | null = null;
     private mapmarker2: Pix32 | null = null;
@@ -7158,6 +7169,7 @@ export class Client extends GameShell {
 
     private entityOverlays(): void {
         this.chatCount = 0;
+        this.splatCount = 0;
 
         for (let index: number = -1; index < this.playerCount + this.npcCount; index++) {
             let entity: ClientEntity | null = null;
@@ -7267,6 +7279,9 @@ export class Client extends GameShell {
                 }
             }
 
+            // qol: record hitsplats instead of drawing them here - they are
+            // painted after the entity loop (before the chat pass) so a later
+            // entity's health bar can never occlude an earlier one's splat
             for (let i = 0; i < 4; ++i) {
                 if (entity.damageCycles[i] <= Client.loopCycle) {
                     continue;
@@ -7288,10 +7303,22 @@ export class Client extends GameShell {
                     this.projectY -= 10;
                 }
 
-                this.hitmarks[entity.damageTypes[i]]?.plotSprite(this.projectX - 12, this.projectY - 12);
-                this.p11?.centreString(entity.damageValues[i].toString(), this.projectX, this.projectY + 4, Colour.BLACK);
-                this.p11?.centreString(entity.damageValues[i].toString(), this.projectX - 1, this.projectY + 3, Colour.WHITE);
+                if (this.splatCount < 64) {
+                    this.splatX[this.splatCount] = this.projectX;
+                    this.splatY[this.splatCount] = this.projectY;
+                    this.splatType[this.splatCount] = entity.damageTypes[i];
+                    this.splatValue[this.splatCount] = entity.damageValues[i];
+                    this.splatCount++;
+                }
             }
+        }
+
+        for (let i: number = 0; i < this.splatCount; i++) {
+            const x: number = this.splatX[i];
+            const y: number = this.splatY[i];
+            this.hitmarks[this.splatType[i]]?.plotSprite(x - 12, y - 12);
+            this.p11?.centreString(this.splatValue[i].toString(), x, y + 4, Colour.BLACK);
+            this.p11?.centreString(this.splatValue[i].toString(), x - 1, y + 3, Colour.WHITE);
         }
 
         for (let i: number = 0; i < this.chatCount; i++) {

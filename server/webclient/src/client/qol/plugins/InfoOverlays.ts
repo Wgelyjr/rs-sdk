@@ -125,6 +125,15 @@ class InfoOverlaysPlugin {
     /** Reused layout rect, viewport-local (scene buffer) coordinates. */
     private readonly orbRect = { x: 0, y: 0, w: 0, h: 0, canvas: false };
 
+    // ---- overlay collapse (opponent strip + stat timers) ----
+    private stripCollapsed: boolean = false;
+    private readonly stripToggleRect = { x: 0, y: 0, w: 0, h: 0 };
+    private stripToggleLive: boolean = false;
+    /** Shared by the canvas and DOM timer panels so a dock-mode switch keeps state. */
+    private timersCollapsed: boolean = false;
+    private readonly timerHeaderRect = { x: 0, y: 0, w: 0, h: 0 };
+    private timerHeaderLive: boolean = false;
+
     // ---- DOM docks ----
     private orbWidget: QolDomWidget | null = null;
     private timerWidget: QolDomWidget | null = null;
@@ -417,6 +426,10 @@ class InfoOverlaysPlugin {
         if (!this.ctx.ingame()) {
             return;
         }
+        // Dead until (re)drawn this frame, so a stale rect never eats a click
+        // after the strip vanishes or the render mode switches to DOM.
+        this.stripToggleLive = false;
+        this.timerHeaderLive = false;
         this.drawOpponentStrip(g);
         if (!this.ctx.domDocks()) {
             this.drawStatTimers(g);
@@ -470,10 +483,39 @@ class InfoOverlaysPlugin {
 
         const cx: number = 256; // viewport-local (512-wide scene buffer)
         const top: number = 4;
+
+        if (this.stripCollapsed) {
+            // Collapsed pill: click anywhere on it to expand again.
+            const pw: number = 40;
+            g.fillRectTrans(cx - pw / 2, top, pw, 14, COL_PANEL, 216);
+            g.drawRectTrans(cx - pw / 2, top, pw, 14, COL_BORDER, 230);
+            if (fonts.b12) {
+                g.centreText(fonts.b12, '[+] Opp', cx, top + 10, COL_WHITE);
+            }
+            this.stripToggleRect.x = cx - pw / 2;
+            this.stripToggleRect.y = top;
+            this.stripToggleRect.w = pw;
+            this.stripToggleRect.h = 14;
+            this.stripToggleLive = true;
+            return;
+        }
+
         const w: number = 150;
         const h: number = 44; // name row + bar row + numbers row, no overlaps
         g.fillRectTrans(cx - w / 2, top, w, h, COL_PANEL, 216);
         g.drawRectTrans(cx - w / 2, top, w, h, COL_BORDER, 230);
+
+        // Collapse toggle: small box in the strip's top-right corner.
+        const tw: number = 20;
+        g.drawRect(cx + w / 2 - tw, top + 1, tw, 12, COL_BORDER);
+        if (fonts.p11) {
+            g.text(fonts.p11, '[-]', cx + w / 2 - tw + 2, top + 10, COL_WHITE);
+        }
+        this.stripToggleRect.x = cx + w / 2 - tw;
+        this.stripToggleRect.y = top + 1;
+        this.stripToggleRect.w = tw;
+        this.stripToggleRect.h = 12;
+        this.stripToggleLive = true;
 
         if (fonts.b12) {
             g.centreText(fonts.b12, name, cx, top + 12, COL_WHITE);
@@ -554,20 +596,39 @@ class InfoOverlaysPlugin {
         // text ("Walk here") that also lives at the viewport top-left.
         const rowH: number = 12;
         const pad: number = 4;
-        let maxW: number = 0;
-        for (let i: number = 0; i < this.rowCount; i++) {
-            const w: number = g.textWidth(f, this.timerText(i));
-            if (w > maxW) {
-                maxW = w;
+        const headerH: number = rowH;
+        const headerText: string = 'Timers ' + (this.timersCollapsed ? '[+]' : '[-]');
+        let maxW: number = g.textWidth(f, headerText);
+        if (!this.timersCollapsed) {
+            for (let i: number = 0; i < this.rowCount; i++) {
+                const w: number = g.textWidth(f, this.timerText(i));
+                if (w > maxW) {
+                    maxW = w;
+                }
             }
         }
         const panelW: number = maxW + pad * 2;
-        const panelH: number = this.rowCount * rowH + pad * 2 - 3;
+        const panelH: number = headerH + (this.timersCollapsed ? 0 : this.rowCount * rowH) + pad * 2 - 3;
         const margin: number = 4;
         const px0: number = this.statTimerPos === 1 || this.statTimerPos === 3 ? 512 - margin - panelW : margin;
         const py0: number = this.statTimerPos >= 2 ? 334 - margin - panelH : margin;
         g.fillRectTrans(px0, py0, panelW, panelH, COL_PANEL, 216);
         g.drawRectTrans(px0, py0, panelW, panelH, COL_BORDER, 230);
+
+        // Header row: title left, collapse glyph right. The whole header band
+        // is the toggle (the click hook hit-tests timerHeaderRect).
+        g.text(f, 'Timers', px0 + pad, py0 + pad + 8, COL_GREY);
+        const glyph: string = this.timersCollapsed ? '[+]' : '[-]';
+        g.text(f, glyph, px0 + panelW - pad - g.textWidth(f, glyph), py0 + pad + 8, COL_GREY);
+        this.timerHeaderRect.x = px0;
+        this.timerHeaderRect.y = py0;
+        this.timerHeaderRect.w = panelW;
+        this.timerHeaderRect.h = pad + headerH;
+        this.timerHeaderLive = true;
+
+        if (this.timersCollapsed) {
+            return;
+        }
 
         const now: number = this.ctx.nowMs();
         const blinkHide: boolean = ((now / 300) | 0) % 2 === 1;
@@ -578,7 +639,7 @@ class InfoOverlaysPlugin {
             }
             const level: number = this.ctx.statLevel(row.skill);
             const base: number = this.ctx.statBase(row.skill);
-            g.text(f, this.timerText(i), px0 + pad, py0 + pad + i * rowH + 8, row.remainingMs <= 5_000 ? COL_RED : level > base ? COL_GREEN : COL_WARN);
+            g.text(f, this.timerText(i), px0 + pad, py0 + pad + headerH + i * rowH + 8, row.remainingMs <= 5_000 ? COL_RED : level > base ? COL_GREEN : COL_WARN);
         }
     }
 
@@ -596,7 +657,7 @@ class InfoOverlaysPlugin {
                     '<div class="qol-orb" data-tab="0"><div class="fill" style="background:#cc2020"></div><div class="num"></div></div>' +
                     '<div class="qol-orb" data-tab="5"><div class="fill" style="background:#d8e6ff"></div><div class="num"></div></div>' +
                     '</div>',
-                519, 118, false);
+                519, 118, false, true, 'orbs');
             if (this.orbWidget !== null) {
                 const fills = this.orbWidget.el.querySelectorAll('.fill');
                 const nums = this.orbWidget.el.querySelectorAll('.num');
@@ -614,7 +675,19 @@ class InfoOverlaysPlugin {
         }
         if (this.timerWidget === null) {
             const anchor = this.timerAnchor();
-            this.timerWidget = dom.create('<div class="qol-panel"></div>', anchor.x, anchor.y, true);
+            this.timerWidget = dom.create('<div class="qol-panel"></div>', anchor.x, anchor.y, true, true, 'stat-timers');
+            if (this.timerWidget !== null) {
+                // Only the header band toggles the collapse; row clicks pass
+                // through. The listener lives on the outer el, whose innerHTML
+                // is replaced on every refresh but the node itself is not.
+                this.timerWidget.el.addEventListener('click', (ev: MouseEvent): void => {
+                    const target = ev.target as HTMLElement | null;
+                    if (target !== null && target.closest('.qol-h') !== null) {
+                        this.timersCollapsed = !this.timersCollapsed;
+                        this.nextDomMs = 0; // refresh on the next tick
+                    }
+                });
+            }
         }
     }
 
@@ -666,16 +739,19 @@ class InfoOverlaysPlugin {
             dom.show(this.timerWidget, on);
             if (on && now >= this.nextDomMs) {
                 this.nextDomMs = now + 250;
-                let html = '<div class="qol-h"><span>Stat timers</span></div>';
-                for (let i = 0; i < this.rowCount; i++) {
-                    const row = this.rows[i];
-                    const level: number = ctx.statLevel(row.skill);
-                    const base: number = ctx.statBase(row.skill);
-                    const delta: number = level - base;
-                    const cls: string = row.remainingMs <= 5_000 ? 'qol-red' : delta > 0 ? 'qol-grn' : 'qol-yel';
-                    html += '<div class="qol-row"><span>' + this.label(row.skill) + ' ' + level + '/' + base +
-                        ' <span class="' + cls + '">(' + (delta > 0 ? '+' + delta : delta) + ')</span></span>' +
-                        '<span class="' + cls + '">' + Math.ceil(row.remainingMs / 1000) + 's</span></div>';
+                let html = '<div class="qol-h"><span>Stat timers</span><span class="qol-dim">' +
+                    (this.timersCollapsed ? '[+]' : '[-]') + '</span></div>';
+                if (!this.timersCollapsed) {
+                    for (let i = 0; i < this.rowCount; i++) {
+                        const row = this.rows[i];
+                        const level: number = ctx.statLevel(row.skill);
+                        const base: number = ctx.statBase(row.skill);
+                        const delta: number = level - base;
+                        const cls: string = row.remainingMs <= 5_000 ? 'qol-red' : delta > 0 ? 'qol-grn' : 'qol-yel';
+                        html += '<div class="qol-row"><span>' + this.label(row.skill) + ' ' + level + '/' + base +
+                            ' <span class="' + cls + '">(' + (delta > 0 ? '+' + delta : delta) + ')</span></span>' +
+                            '<span class="' + cls + '">' + Math.ceil(row.remainingMs / 1000) + 's</span></div>';
+                    }
                 }
                 this.timerWidget.el.innerHTML = '<div class="qol-panel">' + html + '</div>';
             }
@@ -842,11 +918,22 @@ class InfoOverlaysPlugin {
         if (e.button !== 1 || !this.ctx.ingame()) {
             return false;
         }
+        const px: number = e.x - 4; // scene buffer sits at (4,4)
+        const py: number = e.y - 4;
+
+        // Overlay collapse toggles (opponent-strip pill / timer header band)
+        // consume the click so it can't also fire a menu action.
+        if (this.stripToggleLive && px >= this.stripToggleRect.x && px < this.stripToggleRect.x + this.stripToggleRect.w && py >= this.stripToggleRect.y && py < this.stripToggleRect.y + this.stripToggleRect.h) {
+            this.stripCollapsed = !this.stripCollapsed;
+            return true;
+        }
+        if (this.timerHeaderLive && px >= this.timerHeaderRect.x && px < this.timerHeaderRect.x + this.timerHeaderRect.w && py >= this.timerHeaderRect.y && py < this.timerHeaderRect.y + this.timerHeaderRect.h) {
+            this.timersCollapsed = !this.timersCollapsed;
+            return true;
+        }
 
         if (this.orbMode !== ORB_OFF && !this.ctx.domDocks()) {
             const rect = this.layoutOrbs();
-            const px: number = e.x - 4; // scene buffer sits at (4,4)
-            const py: number = e.y - 4;
             if (px >= rect.x && px < rect.x + rect.w && py >= rect.y && py < rect.y + rect.h) {
                 const discIndex: number = this.hitOrb(rect, px - rect.x, py - rect.y);
                 if (discIndex !== -1) {

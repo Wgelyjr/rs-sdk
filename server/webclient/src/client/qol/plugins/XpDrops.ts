@@ -464,8 +464,10 @@ class XpDropsPlugin {
         if (this.trackerWidget === null) {
             const a = this.trackerAnchor();
             // qol: clickable — the container is pointer-events:none, so without
-            // this the collapse toggle's click listener never fires.
-            this.trackerWidget = dom.create('<div class="qol-panel"></div>', a.x, a.y, true, true);
+            // this the collapse toggle's click listener never fires. The id
+            // makes the panel draggable (post-drag clicks are swallowed by the
+            // DOM layer, so a drag can't flip the collapse state).
+            this.trackerWidget = dom.create('<div class="qol-panel"></div>', a.x, a.y, true, true, 'xp-tracker');
             if (this.trackerWidget !== null) {
                 this.trackerWidget.el.addEventListener('click', (): void => {
                     this.collapsed = !this.collapsed;
