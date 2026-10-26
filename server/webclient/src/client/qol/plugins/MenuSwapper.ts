@@ -23,10 +23,9 @@
 // dragged. `buildMinimenu()` also returns early while a drag is in flight
 // (`objDragArea !== 0`), so this handler never reorders mid-drag.
 //
-// Bot builds: `Client.buildMinimenu()` already suppresses the `menuBuilt`
-// dispatch under `ENABLE_BOT_SDK` (the foundation gates it because
-// StateCollector reads the arrays positionally) — no build check needed here;
-// this comment is the defensive note.
+// Bot builds: `Client.buildMinimenu()` dispatches `menuBuilt` in every build
+// (the arrays' only bot-side consumer is the CLI display, and shift-drop is
+// inert without a physically held Shift key) — no build check needed here.
 //
 // Hot-path budget: `menuBuilt` fires every hover tick. Rule/exclusion text is
 // precompiled to RegExp objects and only re-parsed when the setting string

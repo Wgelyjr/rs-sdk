@@ -5123,11 +5123,16 @@ export class Client extends GameShell {
             }
         }
 
-        // qol: menu finalized hook for reordering plugins — never in bot builds
-        // (StateCollector.collectMenuActions reads the raw arrays by index).
-        if (!ENABLE_BOT_SDK) {
-            this.qol?.dispatchMenuBuilt();
-        }
+        // qol: menu finalized hook for menu plugins (reorder + append).
+        // Dispatched in every build. The only bot-side reader of these arrays
+        // is StateCollector.collectMenuActions, whose only consumer is the CLI
+        // display — no SDK action or bot script clicks menus through them.
+        // The menu plugins are safe under automation: shift-drop reorders only
+        // while Shift is physically held (native DOM state, which bots never
+        // produce), and the headless lite client already ran un-gated (it
+        // imports Client.ts directly, so the ENABLE_BOT_SDK define is never
+        // applied there).
+        this.qol?.dispatchMenuBuilt();
     }
 
     // todo: order
