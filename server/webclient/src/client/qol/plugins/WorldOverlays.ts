@@ -172,8 +172,8 @@ class WorldOverlaysImpl {
         const hooks = this.ctx.hooks;
         hooks.onDrawScene((g: QolGraphics): void => this.drawScene(g), 'WorldOverlays.drawScene');
         hooks.onClick((e: QolClickEvent): boolean => this.handleClick(e), 'WorldOverlays.tileMark', CLICK_PRIORITY);
-        // The Alt lens runs before tileMark (higher priority) though the two
-        // gates (button 1 + Alt vs button 2 + Shift) never overlap.
+        // Both gates are Alt+left-click: the lens (higher priority) consumes
+        // clicks that land on a label line; tileMark gets the rest (bare ground).
         hooks.onClick((e: QolClickEvent): boolean => this.handleHideClick(e), 'WorldOverlays.groundHide', HIDE_CLICK_PRIORITY);
 
         // F10 entity hider: pure config passthrough. `() => boolean` is a valid
@@ -311,7 +311,7 @@ class WorldOverlaysImpl {
             label: 'Tile markers',
             type: 'boolean',
             default: true,
-            tooltip: 'Shift+right-click a tile to mark/unmark it (persists across sessions, max 100). ::tilemark lists, ::tilemarkclear clears.'
+            tooltip: 'Alt+left-click a tile to mark/unmark it (persists across sessions, max 100). On a ground item label, Alt+left-click drives the hide lens instead. ::tilemark lists, ::tilemarkclear clears.'
         });
         cfg.define({
             key: 'overlay.tileMarkerColor',
@@ -634,10 +634,10 @@ class WorldOverlaysImpl {
         return this.outlineColor;
     }
 
-    /** Shift+right-click inside the viewport toggles a marker; consumes the click. */
+    /** Alt+left-click inside the viewport toggles a marker; consumes the click. */
     private handleClick(e: QolClickEvent): boolean {
         const ctx = this.ctx;
-        if (e.button !== 2 || !e.shift || !ctx.config.getBool('overlay.tileMarkers')) {
+        if (e.button !== 1 || !e.alt || !ctx.config.getBool('overlay.tileMarkers')) {
             return false;
         }
         // Viewport rect in full-frame coords (512x334 buffer at 4,4).
@@ -799,7 +799,7 @@ class WorldOverlaysImpl {
         const client: any = this.ctx.client;
         const msg: string =
             `Tile markers: ${this.markers.length} (max ${MARKER_CAP}). ` +
-            'Shift+right-click a tile to mark/unmark; ::tilemarkclear removes all.';
+            'Alt+left-click a tile to mark/unmark; ::tilemarkclear removes all.';
         try {
             client.addChat(0, msg, '');
         } catch (_e) {
