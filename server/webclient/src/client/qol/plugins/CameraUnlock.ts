@@ -6,8 +6,9 @@
 // plugin maps `state.distance = round(vanilla * m)` with
 // `m ∈ [visual.zoomMin, visual.zoomMax]`, where values below 1 zoom IN
 // (`zoomMin`, default 0.5) and values above 1 zoom OUT (`zoomMax`, default
-// 3.0). `m = 1` is exactly vanilla distance, so the wheel converges on the
-// vanilla view when reset. Wheel notches move the *target* multiplicatively
+// 1.5, hard-capped at 3.0). `m = 1` is exactly vanilla distance, so the
+// wheel converges on the vanilla view when reset. Wheel notches move the
+// *target* multiplicatively
 // (×/÷ 1.1); the camera map handler lerps the actual `m` toward the target
 // every render frame (the hook runs per `gameDrawMain`, not per logic tick)
 // and caps the per-call change, so zoom is smooth and can never teleport.
@@ -100,9 +101,9 @@ export default {
             section: 'Visuals',
             label: 'Max zoom out (x vanilla)',
             type: 'slider',
-            default: 3.0,
+            default: 1.5,
             min: 1.0,
-            max: 6.0,
+            max: 3.0,
             tooltip: 'Largest camera-distance factor. 0.25 steps. Zooming past ~2x may show the edges of the loaded map area.'
         });
         config.define({
