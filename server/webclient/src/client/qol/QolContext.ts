@@ -69,7 +69,7 @@ export class QolContext {
         public readonly config: QolConfig,
         public readonly hooks: QolHooks,
         public readonly g: QolGraphics,
-        private readonly registerChatCommand: (cmd: string, cb: () => void) => void
+        private readonly registerChatCommand: (cmd: string, cb: (args: string) => void) => void
     ) {}
 
     /** True in the bot browser build (`ENABLE_BOT_SDK === 'true'`). */
@@ -363,8 +363,8 @@ export class QolContext {
         }
     }
 
-    /** Register a `::cmd` chat command; `cb` runs instead of the CLIENT_CHEAT passthrough. */
-    chatCommand(cmd: string, cb: () => void): void {
+    /** Register a `::cmd` chat command; `cb` runs instead of the CLIENT_CHEAT passthrough. `args` is the text after the command word (may be empty). */
+    chatCommand(cmd: string, cb: (args: string) => void): void {
         this.registerChatCommand(cmd, cb);
     }
 

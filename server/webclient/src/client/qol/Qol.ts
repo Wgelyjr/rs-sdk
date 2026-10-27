@@ -75,7 +75,7 @@ export class Qol {
     readonly panel: QolSettingsPanel;
 
     private readonly menuView: QolMenuViewImpl;
-    private readonly chatCommands: Map<string, () => void> = new Map();
+    private readonly chatCommands: Map<string, (args: string) => void> = new Map();
 
     // Reused dispatch payloads — hot paths (tick, click, camera) allocate nothing.
     private readonly clickEvent: QolClickEvent = { button: 0, x: 0, y: 0, shift: false, alt: false, ctrl: false, middle: false };
@@ -91,7 +91,7 @@ export class Qol {
     constructor(readonly client: any) {
         this.config = new QolConfig(Qol.isBotBuildStatic());
         this.menuView = new QolMenuViewImpl(client);
-        this.ctx = new QolContext(client, this.config, this.hooks, this.g, (cmd: string, cb: () => void) => this.registerChatCommand(cmd, cb));
+        this.ctx = new QolContext(client, this.config, this.hooks, this.g, (cmd: string, cb: (args: string) => void) => this.registerChatCommand(cmd, cb));
         this.ctx.dom = this.dom;
         this.panel = new QolSettingsPanel(this.ctx);
     }
@@ -345,25 +345,27 @@ export class Qol {
 
     // ---- chat commands ----
 
-    /** Register `::cmd`; foundation dispatch consults this before the CLIENT_CHEAT passthrough. */
-    registerChatCommand(cmd: string, cb: () => void): void {
+    /** Register `::cmd`; foundation dispatch consults this before the CLIENT_CHEAT passthrough. `cb` receives the text after the command word (may be empty). */
+    registerChatCommand(cmd: string, cb: (args: string) => void): void {
         this.chatCommands.set(cmd.toLowerCase(), cb);
     }
 
     /**
-     * Try to consume a typed `::command` (text after the two colons, may carry
-     * arguments). Returns true when a registered command ran — the chat chain
-     * then skips the server CLIENT_CHEAT passthrough.
+     * Try to consume a typed `::command`. `input` is the text after the two
+     * colons: the first word is the command, the trimmed remainder is passed
+     * to the callback as `args`. Returns true when a registered command ran —
+     * the chat chain then skips the server CLIENT_CHEAT passthrough.
      */
     handleChatCommand(input: string): boolean {
         const space: number = input.indexOf(' ');
         const cmd: string = (space === -1 ? input : input.substring(0, space)).trim().toLowerCase();
+        const args: string = space === -1 ? '' : input.substring(space + 1).trim();
         const cb = this.chatCommands.get(cmd);
         if (cb === undefined) {
             return false;
         }
         try {
-            cb();
+            cb(args);
         } catch (e) {
             console.warn(`[qol] chat command '::${cmd}' failed`, e);
         }

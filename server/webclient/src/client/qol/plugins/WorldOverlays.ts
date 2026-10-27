@@ -185,9 +185,10 @@ class WorldOverlaysImpl {
         hooks.onHideProjectile((): boolean => cfg.getBool('visual.hideProjectiles'), 'WorldOverlays.hideProjectiles');
         hooks.onHideGroundItem((): boolean => cfg.getBool('visual.hideGroundItems'), 'WorldOverlays.hideGroundItems');
 
-        // `chatCommand` callbacks receive no arguments (Qol.handleChatCommand
-        // drops everything after the command word), so reporting and clearing
-        // are separate commands: `::tilemark` lists, `::tilemarkclear` clears.
+        // These commands need no arguments (Qol.handleChatCommand passes the
+        // text after the command word through, but it is ignored here), so
+        // reporting and clearing are separate commands: `::tilemark` lists,
+        // `::tilemarkclear` clears.
         this.ctx.chatCommand('tilemark', (): void => this.reportMarkers());
         this.ctx.chatCommand('tilemarkclear', (): void => this.clearMarkers());
         this.ctx.chatCommand('groundhide', (): void => this.reportHidden());
