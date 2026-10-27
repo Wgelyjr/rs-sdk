@@ -332,6 +332,13 @@ export class QolContext {
         if (this.client.overChatComId > 0) {
             return { area: 3, comId: this.client.overChatComId, slot: this.client.hoveredSlot };
         }
+        // Inventory/bank grid hovers never set a region over*ComId (all three
+        // stay 0 over a grid); the slot tracker is the only signal. Fall back
+        // to it so menu logic (shift-drop promotion, hover-item name) sees the
+        // hover context instead of bailing on the `=== null` gate.
+        if (this.client.hoveredSlotComId > 0) {
+            return { area: 0, comId: this.client.hoveredSlotComId, slot: this.client.hoveredSlot };
+        }
         return null;
     }
 

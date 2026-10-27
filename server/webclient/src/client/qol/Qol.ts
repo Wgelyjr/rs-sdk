@@ -269,7 +269,7 @@ export class Qol {
         this.hooks.dispatchXpGain(e);
     }
 
-    /** End of `buildMinimenu()`, outside bot builds only (client gates the call). */
+    /** End of `buildMinimenu()` — called in all builds, including bot. */
     dispatchMenuBuilt(): void {
         if (this.hooks.menuBuiltCount === 0) {
             return;

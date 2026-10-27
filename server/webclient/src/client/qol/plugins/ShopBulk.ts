@@ -4,11 +4,13 @@
 // Everything lives in the right-click menus — the shop window itself is
 // untouched (user correction: the actions are menu entries, not window UI):
 //
-//   right-click a shelf item (shop stock)   → "Buy <X>"  + "Buy Max"
-//   right-click an item in your own grid    → "Sell <X>" + "Sell Max" + "Sell All"
+//   right-click a shelf item (shop stock)   → "Buy <X>"  + "Buy All"
+//   right-click an item in your own grid    → "Sell <X>" + "Sell All"
 //
 // <X> is the "Bulk quantity" slider (Shop settings section, 1-1000,
-// default 100).
+// default 100). "All" = every copy of the clicked item (until the stock or
+// bag of that item runs dry) — never the whole inventory (user correction:
+// "Sell All" must sell all of the selected item, not dump the bag).
 //
 // Why not one big packet: the shop interface has no Max option on the
 // server side —
@@ -49,7 +51,7 @@
 //         no change for 1500ms      → rejected, task done
 //     - else send one step (client.shopBuy/shopSell), snapshot, wait
 //
-// "Sell All" pushes one task per occupied side-inventory slot (slot order).
+// "All" = remaining 0, i.e. every copy of the clicked item until it runs dry.
 // A new bulk request replaces the queue (last click wins).
 //
 // drawTop paints only the busy status line under the shop hint text while a
@@ -84,8 +86,7 @@ const STATUS_X: number = 63;
 const STATUS_Y: number = 307;
 const COL_STATUS: number = 0xc8b89a;
 
-const MAX_BUY_TEXT: string = 'Buy Max';
-const MAX_SELL_TEXT: string = 'Sell Max';
+const BUY_ALL_TEXT: string = 'Buy All';
 const SELL_ALL_TEXT: string = 'Sell All';
 
 /** No state change this long after a send → the server rejected the step. */
@@ -123,10 +124,9 @@ class ShopBulkPlugin {
     // ---- injected menu entries (final indices; -1 = none in this build) ----
 
     private entryX: number = -1;
-    private entryMax: number = -1;
     private entryAll: number = -1;
     private readonly entryXMeta: EntryMeta = { comId: 0, rawId: 0 };
-    private readonly entryMaxMeta: EntryMeta = { comId: 0, rawId: 0 };
+    private readonly entryAllMeta: EntryMeta = { comId: 0, rawId: 0 };
 
     // ---- the pump ----
 
@@ -147,7 +147,7 @@ class ShopBulkPlugin {
             type: 'boolean',
             default: true,
             tooltip:
-                'Buy X / Buy Max on shop stock and Sell X / Sell Max / Sell All on your own items, in the right-click menus.'
+                'Buy X / Buy All on shop stock and Sell X / Sell All on your own items, in the right-click menus. "All" = every copy of that item.'
         });
         ctx.config.define({
             key: QTY_KEY,
@@ -157,7 +157,7 @@ class ShopBulkPlugin {
             default: QTY_DEFAULT,
             min: QTY_MIN,
             max: QTY_MAX,
-            tooltip: 'Quantity used by the "Buy X" and "Sell X" menu entries. Max = until the stock or bag runs dry.'
+            tooltip: 'Quantity used by the "Buy X" and "Sell X" menu entries. "All" = until the stock or bag of that item runs dry.'
         });
         this.enabled = ctx.config.getBool(KEY);
         this.qty = ctx.config.getNum(QTY_KEY);
@@ -224,27 +224,7 @@ class ShopBulkPlugin {
         this.tasks.length = 0;
         this.tasks.push({ comId, rawId, remaining, startedAt: this.now });
         this.pending = false;
-        console.log(`[qol] shop: ${comId === SHELF_INV_ID ? 'buy' : 'sell'} ${remaining > 0 ? remaining : 'max'} of obj ${rawId - 1}`);
-    }
-
-    /** One task per occupied side-inventory slot, in slot order. */
-    private startSellAll(): void {
-        const com: IfType | undefined = IfType.list[SIDE_INV_ID];
-        if (!com || !com.linkObjType || !com.linkObjNumber) {
-            return;
-        }
-        const inv: Int32Array = com.linkObjType;
-        const num: Int32Array = com.linkObjNumber;
-        this.tasks.length = 0;
-        let count: number = 0;
-        for (let s: number = 0; s < inv.length; s++) {
-            if (inv[s] > 0) {
-                this.tasks.push({ comId: SIDE_INV_ID, rawId: inv[s], remaining: num[s], startedAt: this.now });
-                count++;
-            }
-        }
-        this.pending = false;
-        console.log(`[qol] shop: sell-all over ${count} inventory slot(s)`);
+        console.log(`[qol] shop: ${comId === SHELF_INV_ID ? 'buy' : 'sell'} ${remaining > 0 ? remaining : 'all'} of obj ${rawId - 1}`);
     }
 
     // ---- the pump ----
@@ -337,7 +317,6 @@ class ShopBulkPlugin {
 
     private menuBuilt(menu: QolMenuView, ctx: QolContext): void {
         this.entryX = -1;
-        this.entryMax = -1;
         this.entryAll = -1;
 
         if (!this.enabled || !ctx.ingame() || !this.shopOpen(ctx)) {
@@ -383,25 +362,18 @@ class ShopBulkPlugin {
 
         const buy: boolean = comId === SHELF_INV_ID;
         menu.add(buy ? this.buyXText : this.sellXText, MiniMenuAction.INV_BUTTON5, rawId - 1, slot, comId);
-        menu.add(buy ? MAX_BUY_TEXT : MAX_SELL_TEXT, MiniMenuAction.INV_BUTTON5, rawId - 1, slot, comId);
-        if (!buy) {
-            // "Sell All" dumps the whole bag; the clicked slot is irrelevant.
-            menu.add(SELL_ALL_TEXT, MiniMenuAction.INV_BUTTON5, rawId - 1, slot, comId);
-        }
-        // The additions land at the menu top; move them down to k/k+1(/k+2).
+        // "All" = every copy of the clicked item (remaining 0 in startTask).
+        menu.add(buy ? BUY_ALL_TEXT : SELL_ALL_TEXT, MiniMenuAction.INV_BUTTON5, rawId - 1, slot, comId);
+        // The additions land at the menu top; move them down to k/k+1.
         menu.move(n, k);
         menu.move(n + 1, k + 1);
-        if (!buy) {
-            menu.move(n + 2, k + 2);
-        }
 
         this.entryX = k;
-        this.entryMax = k + 1;
-        this.entryAll = buy ? -1 : k + 2;
+        this.entryAll = k + 1;
         this.entryXMeta.comId = comId;
         this.entryXMeta.rawId = rawId;
-        this.entryMaxMeta.comId = comId;
-        this.entryMaxMeta.rawId = rawId;
+        this.entryAllMeta.comId = comId;
+        this.entryAllMeta.rawId = rawId;
     }
 
     // ---- click ----
@@ -442,13 +414,10 @@ class ShopBulkPlugin {
                         this.closeMenu(client);
                         return true;
                     }
-                    if (i === this.entryMax) {
-                        this.startTask(this.entryMaxMeta.comId, this.entryMaxMeta.rawId, 0);
-                        this.closeMenu(client);
-                        return true;
-                    }
                     if (i === this.entryAll) {
-                        this.startSellAll();
+                        // "All" = every copy of the clicked item (remaining 0),
+                        // never the rest of the inventory.
+                        this.startTask(this.entryAllMeta.comId, this.entryAllMeta.rawId, 0);
                         this.closeMenu(client);
                         return true;
                     }

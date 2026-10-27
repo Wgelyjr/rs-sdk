@@ -27,6 +27,13 @@
 // hook: the hook can only ADD sleep after mainredraw() — it cannot shorten
 // the loop-top `sleep(delta)` (the ~70 Hz outer floor) and cannot decouple
 // the logic accumulator, which the ±2% logic-invariance requirement needs.
+//
+// `visual.hideSdkPanel`: the bot page (server/engine/view/bot.ejs) mounts the
+// SDK world-state/actions panel in `#sdk-panel-container` below the canvas.
+// The setting is defined only when that container exists (standard client
+// pages have no SDK panel, so the toggle would be a no-op there), and simply
+// flips the container's `display` — the `?minimal` URL mode's
+// `display: none !important` rule still wins when both are active.
 
 import { canvas } from '#/graphics/Canvas.js';
 
@@ -148,6 +155,18 @@ class DisplayControls {
         }
     }
 
+    /** Settings → SDK panel visibility sync (bot pages only, see header). */
+    applySdkPanelVisibility(): void {
+        if (typeof document === 'undefined') {
+            return;
+        }
+        const el: HTMLElement | null = document.getElementById('sdk-panel-container');
+        if (el === null) {
+            return;
+        }
+        el.style.display = this.ctx.config.getBool('visual.hideSdkPanel') ? 'none' : '';
+    }
+
     /**
      * Cheap tick guard: the page's own size controls (hideControls/setSize) write
      * the same inline props without `!important`, so a stale comparison of the
@@ -225,8 +244,21 @@ class DisplayControls {
             tooltip: 'Redraw rate cap for the render loop. Game logic speed is unchanged at every cap. 50 (default) = the client\u2019s built-in pacing.'
         });
 
-        config.onChange('visual.displayScale', (): void => this.applyScale());
-        config.onChange('visual.fpsCap', (): void => this.applyFpsCap());
+        // Defined only where the container exists (bot pages): the standard
+        // client has no SDK panel, and a stored value survives as an unknown
+        // key, reapplying when a bot page is opened in the same browser.
+        const sdkPanelEl: HTMLElement | null = typeof document === 'undefined' ? null : document.getElementById('sdk-panel-container');
+        if (sdkPanelEl !== null) {
+            config.define({
+                key: 'visual.hideSdkPanel',
+                section: 'Visuals',
+                label: 'Hide SDK panel',
+                type: 'boolean',
+                default: false,
+                tooltip: 'Hide the SDK world state / actions panel below the game canvas (bot client pages only). The F10 settings panel is drawn in-game, so it stays reachable.'
+            });
+            config.onChange('visual.hideSdkPanel', (): void => this.applySdkPanelVisibility());
+        }
 
         // GameShell.resize() → re-assert (internal size is fixed, but a resize()
         // would change the buffer our scale math reads from).
@@ -253,6 +285,7 @@ class DisplayControls {
 
         this.applyScale();
         this.applyFpsCap();
+        this.applySdkPanelVisibility();
     }
 }
 
