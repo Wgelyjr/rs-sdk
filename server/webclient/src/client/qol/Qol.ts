@@ -327,6 +327,14 @@ export class Qol {
         return this.hooks.dispatchFramePace(nowMs);
     }
 
+    /** `roofTop` map hook at the `roofCheck()` call site: remapped top render level, or null. */
+    mapRoofTop(maxLevel: number): number | null {
+        if (this.hooks.roofTopCount === 0) {
+            return null;
+        }
+        return this.hooks.dispatchRoofTop(maxLevel);
+    }
+
     /** `GameShell.resize()`. */
     dispatchResize(width: number, height: number): void {
         if (this.hooks.resizeCanvasCount === 0) {

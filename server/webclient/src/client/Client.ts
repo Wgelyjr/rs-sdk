@@ -6773,6 +6773,11 @@ export class Client extends GameShell {
             level = this.roofCheck2();
         } else {
             level = this.roofCheck();
+            // qol: remap the top render level (e.g. "remove roofs" = player level); null keeps vanilla
+            const qolLevel: number | null = this.qol?.mapRoofTop(level) ?? null;
+            if (qolLevel !== null) {
+                level = qolLevel;
+            }
         }
 
         const camX: number = this.camX;

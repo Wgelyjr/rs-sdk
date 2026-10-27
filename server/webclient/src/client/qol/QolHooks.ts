@@ -109,6 +109,14 @@ export type ProjectileFilterHandler = (proj: ClientProj) => boolean;
 export type GroundItemFilterHandler = (obj: ClientObj) => boolean;
 export type CameraMapHandler = (state: QolCameraState) => void;
 export type FramePaceHandler = (nowMs: number, previous: number | null) => number | null;
+/**
+ * Map hook at the `roofCheck()` call site in `gameDrawMain()`: the topmost
+ * level `world.renderAll()` will draw this frame (vanilla `roofCheck()`
+ * result). Return `null` to keep it, or a number to replace it. "Remove
+ * roofs" returns the player's level — the map's built-in RemoveRoof-tile
+ * behavior applied to every tile.
+ */
+export type RoofTopMapHandler = (maxLevel: number) => number | null;
 
 /** One registered handler with its error bookkeeping. */
 interface HookSlot<T> {
@@ -140,6 +148,7 @@ export class QolHooks {
     private readonly hideGroundItem: Array<HookSlot<GroundItemFilterHandler>> = [];
     private readonly camera: Array<HookSlot<CameraMapHandler>> = [];
     private readonly framePace: Array<HookSlot<FramePaceHandler>> = [];
+    private readonly roofTop: Array<HookSlot<RoofTopMapHandler>> = [];
     private nextOrder: number = 1;
 
     // ---- registration ----
@@ -231,6 +240,15 @@ export class QolHooks {
         return this.register(this.framePace, fn, name, priority);
     }
 
+    /**
+     * Map hook: remap the top render level at the `roofCheck()` call site.
+     * Return `null` to keep the vanilla value. Later handlers see earlier
+     * results.
+     */
+    onRoofTop(fn: RoofTopMapHandler, name: string = 'roofTop', priority: number = 0): QolUnsubscribe {
+        return this.register(this.roofTop, fn, name, priority);
+    }
+
     // ---- dispatch (called from Qol) ----
 
     get tickCount(): number {
@@ -291,6 +309,10 @@ export class QolHooks {
 
     get framePaceCount(): number {
         return this.countOf(this.framePace);
+    }
+
+    get roofTopCount(): number {
+        return this.countOf(this.roofTop);
     }
 
     dispatchTick(dtMs: number): void {
@@ -358,6 +380,25 @@ export class QolHooks {
             }
             try {
                 const value: number | null = slot.fn(nowMs, result);
+                if (value !== null && value !== undefined) {
+                    result = value;
+                }
+            } catch (e) {
+                this.recordError(slot, e);
+            }
+        }
+        return result;
+    }
+
+    /** Pipes the top render level through the chain; null when nothing overrode it. */
+    dispatchRoofTop(maxLevel: number): number | null {
+        let result: number | null = null;
+        for (const slot of this.roofTop) {
+            if (slot.disabled) {
+                continue;
+            }
+            try {
+                const value: number | null = slot.fn(result ?? maxLevel);
                 if (value !== null && value !== undefined) {
                     result = value;
                 }

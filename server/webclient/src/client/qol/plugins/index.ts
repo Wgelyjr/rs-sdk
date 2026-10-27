@@ -8,6 +8,7 @@ import type { QolContext } from '#/client/qol/QolContext.js';
 import MenuSwapper from './MenuSwapper.js';
 import XpDrops from './XpDrops.js';
 import CameraUnlock from './CameraUnlock.js';
+import RemoveRoofs from './RemoveRoofs.js';
 import Display from './Display.js';
 import InfoOverlays from './InfoOverlays.js';
 import WorldOverlays from './WorldOverlays.js';
@@ -22,6 +23,7 @@ export const qolPlugins: ReadonlyArray<{ name: string; register(ctx: QolContext)
     MenuSwapper,
     XpDrops,
     CameraUnlock,
+    RemoveRoofs,
     Display,
     InfoOverlays,
     WorldOverlays,
