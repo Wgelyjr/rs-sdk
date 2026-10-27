@@ -148,6 +148,16 @@ export default class QolSettingsPanel {
     private scrollDrag: boolean = false;
     private scrollGrab: number = 0;
 
+    // qol mobile: touch drags. The click hook only fires on release, so a
+    // touch can't drive slider/thumb drags the way a held mouse button does;
+    // the client calls touchBegin/touchMove/touchEnd for touches that start
+    // inside panelScreenRect(). A tap (no committed motion) falls through to
+    // the normal synthesized click.
+    private touchMode: 'none' | 'pending' | 'scroll' | 'drag' = 'none';
+    private touchBeginX: number = 0;
+    private touchBeginY: number = 0;
+    private touchLastY: number = 0;
+
     /** Footer status line, with expiry so errors don't linger. */
     private statusText: string = '';
     private statusColor: number = COL_YELLOW;
@@ -216,6 +226,80 @@ export default class QolSettingsPanel {
         this.panelOpen = false;
         this.clearTransient();
         this.ctx.config.flush();
+    }
+
+    /** Full-frame screen rect of the open panel, or null when closed. */
+    panelScreenRect(): { x: number; y: number; w: number; h: number } | null {
+        if (!this.panelOpen) {
+            return null;
+        }
+        return { x: PANEL_X + 4, y: PANEL_Y + 4, w: PANEL_W, h: PANEL_H };
+    }
+
+    /** qol mobile: a finger went down inside the panel; track it for touch drags. */
+    touchBegin(x: number, y: number): void {
+        if (!this.panelOpen) {
+            this.touchMode = 'none';
+            return;
+        }
+        const lx: number = x - 4 - PANEL_X;
+        const ly: number = y - 4 - PANEL_Y;
+        if (lx < 0 || ly < 0 || lx >= PANEL_W || ly >= PANEL_H) {
+            this.touchMode = 'none';
+            return;
+        }
+        this.touchBeginX = x;
+        this.touchBeginY = y;
+        this.touchLastY = y;
+        this.touchMode = 'pending';
+    }
+
+    /** True once the finger moved far enough to commit to a scroll/drag. */
+    touchCommitted(): boolean {
+        return this.touchMode === 'scroll' || this.touchMode === 'drag';
+    }
+
+    /** qol mobile: finger moved; commits to a scroll/drag on the first real motion. */
+    touchMove(x: number, y: number): void {
+        if (!this.panelOpen || this.touchMode === 'none') {
+            return;
+        }
+        if (this.touchMode === 'pending') {
+            if (Math.abs(x - this.touchBeginX) < 6 && Math.abs(y - this.touchBeginY) < 6) {
+                return;
+            }
+            const lx: number = this.touchBeginX - 4 - PANEL_X;
+            const ly: number = this.touchBeginY - 4 - PANEL_Y;
+            const hit: PanelRegion | null = this.findRegion(lx, ly);
+            if (hit !== null && hit.kind === 'slider') {
+                this.dragKey = hit.key;
+                this.applySlider(hit, lx);
+                this.touchMode = 'drag';
+            } else if (hit !== null && hit.kind === 'scrollThumb') {
+                this.scrollDrag = true;
+                this.scrollGrab = ly - hit.y;
+                this.touchMode = 'drag';
+            } else {
+                this.touchMode = 'scroll';
+            }
+        }
+        if (this.touchMode === 'drag') {
+            this.applyDragAt(x - 4 - PANEL_X, y - 4 - PANEL_Y);
+        } else if (this.touchMode === 'scroll') {
+            // finger up (y decreasing) scrolls the list forward, like wheel down
+            const dy: number = this.touchLastY - y;
+            if (this.mode === 'settings') {
+                this.scrollBy(dy);
+            } else {
+                this.textScrollBy(dy);
+            }
+        }
+        this.touchLastY = y;
+    }
+
+    /** qol mobile: finger lifted; a committed drag releases on the next poll. */
+    touchEnd(): void {
+        this.touchMode = 'none';
     }
 
     /**
@@ -471,6 +555,10 @@ export default class QolSettingsPanel {
         if (this.dragKey === null && !this.scrollDrag) {
             return;
         }
+        if (this.touchMode === 'drag') {
+            // a touch owns the drag; touchEnd() + this poll's next frame release it
+            return;
+        }
         const client: any = this.ctx.client;
         const button: number = client.mouseButton ?? 0;
         if (button !== 1) {
@@ -478,8 +566,11 @@ export default class QolSettingsPanel {
             this.scrollDrag = false;
             return;
         }
-        const lx: number = (client.mouseX ?? -1) - 4 - PANEL_X;
-        const ly: number = (client.mouseY ?? -1) - 4 - PANEL_Y;
+        this.applyDragAt((client.mouseX ?? -1) - 4 - PANEL_X, (client.mouseY ?? -1) - 4 - PANEL_Y);
+    }
+
+    /** Shared slider/thumb drag math for the mouse poll and the touch path. */
+    private applyDragAt(lx: number, ly: number): void {
         if (this.dragKey !== null) {
             const region: PanelRegion | null = this.findRegionByKind('slider', this.dragKey);
             if (region !== null) {

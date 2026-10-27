@@ -17,6 +17,7 @@ import BankTabs from './BankTabs.js';
 import BankDeposit from './BankDeposit.js';
 import BottomBar from './BottomBar.js';
 import ShopBulk from './ShopBulk.js';
+import MobileBar from './MobileBar.js';
 
 /** Every plugin module: `export default { name, register(ctx) }`. */
 export const qolPlugins: ReadonlyArray<{ name: string; register(ctx: QolContext): void }> = [
@@ -31,7 +32,9 @@ export const qolPlugins: ReadonlyArray<{ name: string; register(ctx: QolContext)
     BankTabs,
     BankDeposit,
     BottomBar,
-    ShopBulk
+    ShopBulk,
+    // Mobile last: its menuBuilt disarm must run after MenuSwapper's promotion
+    MobileBar
 ];
 
 /** Call every plugin's `register(ctx)` with per-plugin error containment. */

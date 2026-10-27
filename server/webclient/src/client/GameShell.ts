@@ -38,9 +38,44 @@ export default abstract class GameShell {
     // qol: native modifier state, tracked from DOM events. Deliberately NOT routed
     // through keyHeld/keyQueue: ch < 30 gets zeroed and control chars would leak
     // into chat (plan §2.3).
-    public shiftHeld: boolean = false;
-    public altHeld: boolean = false;
+    //
+    // shiftHeld/altHeld are accessor pairs: the physical flag mirrors the DOM
+    // events (qolModifiersFrom), and the QoL layer can OR in a "virtual" flag
+    // (the mobile action bar arms Alt/Shift for one tap). The setters only
+    // rewrite the physical half, so an armed virtual modifier survives the next
+    // touch press, which re-mirrors shiftKey/altKey=false on every pointerdown.
+    private physicalShiftHeld: boolean = false;
+    private physicalAltHeld: boolean = false;
+    private virtualShiftHeld: boolean = false;
+    private virtualAltHeld: boolean = false;
+
+    public get shiftHeld(): boolean {
+        return this.physicalShiftHeld || this.virtualShiftHeld;
+    }
+
+    public set shiftHeld(value: boolean) {
+        this.physicalShiftHeld = value;
+    }
+
+    public get altHeld(): boolean {
+        return this.physicalAltHeld || this.virtualAltHeld;
+    }
+
+    public set altHeld(value: boolean) {
+        this.physicalAltHeld = value;
+    }
+
     public ctrlHeld: boolean = false;
+
+    /** qol: arm/clear the virtual Shift (mobile Drop mode). */
+    public setVirtualShiftHeld(value: boolean): void {
+        this.virtualShiftHeld = value;
+    }
+
+    /** qol: arm/clear the virtual Alt (mobile tile-marker mode). */
+    public setVirtualAltHeld(value: boolean): void {
+        this.virtualAltHeld = value;
+    }
 
     // qol: middle mouse button state. Vanilla maps everything non-right to left,
     // so the middle button keeps its own click code (mouseButton/mouseClickButton

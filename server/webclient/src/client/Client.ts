@@ -14421,6 +14421,18 @@ export class Client extends GameShell {
     private dragging: boolean = false;
     private panning: boolean = false;
 
+    // qol mobile gestures: two-finger tap (context menu), swipe-up (chat),
+    // double-tap (recenter), and open-panel touch ownership.
+    private touchPointers: Map<number, { x: number; y: number; t: number }> = new Map();
+    private twoFinger: boolean = false;
+    private twoFingerMoved: boolean = false;
+    private twoFingerMidX: number = 0;
+    private twoFingerMidY: number = 0;
+    private twoFingerStartTime: number = 0;
+    private touchPanel: boolean = false;
+    private lastTapTime: number = 0;
+    private lastTapInGame: boolean = false;
+
     override pointerDown(x: number, y: number, e: PointerEvent) {
         if (MobileKeyboard.isWithinCanvasKeyboard(x, y) && !this.exceedsGrabThreshold(20)) {
             MobileKeyboard.captureMouseDown(x, y);
@@ -14446,6 +14458,36 @@ export class Client extends GameShell {
             this.startedInGame = this.insideGame();
             this.startedInSide = this.insideSide();
             this.startedInChat = this.insideChat();
+
+            // qol mobile: track this pointer for the two-finger tap gesture
+            this.touchPointers.set(e.pointerId, { x, y, t: e.timeStamp });
+            if (this.touchPointers.size === 2) {
+                this.twoFinger = true;
+                this.twoFingerMoved = false;
+                const entries: Array<{ x: number; y: number; t: number }> = Array.from(this.touchPointers.values());
+                this.twoFingerMidX = (entries[0].x + entries[1].x) / 2;
+                this.twoFingerMidY = (entries[0].y + entries[1].y) / 2;
+                this.twoFingerStartTime = Math.min(entries[0].t, entries[1].t);
+                // cancel whatever the first finger was doing
+                this.panning = false;
+                this.dragging = false;
+                this.nextMouseClickButton = 0;
+                this.mouseButton = 0;
+                this.keyHeld[1] = 0;
+                this.keyHeld[2] = 0;
+                this.keyHeld[3] = 0;
+                this.keyHeld[4] = 0;
+            }
+
+            // qol mobile: an open settings panel owns touches that start in it
+            const panel: any = this.qol !== null ? this.qol.panel : null;
+            const rect: any = panel !== null ? panel.panelScreenRect() : null;
+            if (rect !== null && x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h) {
+                this.touchPanel = true;
+                panel.touchBegin(x, y);
+            } else {
+                this.touchPanel = false;
+            }
         }
     }
 
@@ -14472,6 +14514,45 @@ export class Client extends GameShell {
             this.mouseX = x;
             this.mouseY = y;
 
+            this.touchPointers.delete(e.pointerId);
+
+            // qol mobile: two-finger tap synthesizes a right-click (context menu)
+            if (this.twoFinger) {
+                this.panning = false;
+                this.dragging = false;
+                this.keyHeld[1] = 0;
+                this.keyHeld[2] = 0;
+                this.keyHeld[3] = 0;
+                this.keyHeld[4] = 0;
+                if (this.touchPointers.size === 0) {
+                    const qualifies: boolean =
+                        !this.twoFingerMoved &&
+                        e.timeStamp - this.twoFingerStartTime < 300 &&
+                        this.qol !== null &&
+                        this.qol.config.getBool('mobile.gestureMenu');
+                    this.twoFinger = false;
+                    this.twoFingerMoved = false;
+                    if (qualifies) {
+                        // mirror the long-press synthesis: button 2, 40ms release
+                        this.nextMouseClickX = this.twoFingerMidX;
+                        this.nextMouseClickY = this.twoFingerMidY;
+                        this.nextMouseClickTime = performance.now();
+                        this.nextMouseClickButton = 2;
+                        this.mouseButton = 2;
+                        setTimeout(() => {
+                            this.mouseButton = 0;
+                        }, 40);
+                        return;
+                    }
+                }
+                // either finger still down, or the tap didn't qualify: no one-finger click
+                this.nextMouseClickX = -1;
+                this.nextMouseClickY = -1;
+                this.nextMouseClickButton = 0;
+                this.mouseButton = 0;
+                return;
+            }
+
             if (this.dragging) {
                 this.dragging = false;
 
@@ -14490,6 +14571,56 @@ export class Client extends GameShell {
                 this.keyHeld[4] = 0;
                 return;
             } else {
+                // qol mobile: an open settings panel owns the gesture; a committed
+                // touch drag (scroll/slider/thumb) swallows the release click
+                if (this.touchPanel) {
+                    const panel: any = this.qol !== null ? this.qol.panel : null;
+                    const committed: boolean = panel !== null && panel.touchCommitted();
+                    if (panel !== null) {
+                        panel.touchEnd();
+                    }
+                    this.touchPanel = false;
+                    if (committed) {
+                        this.nextMouseClickX = -1;
+                        this.nextMouseClickY = -1;
+                        this.nextMouseClickButton = 0;
+                        this.mouseButton = 0;
+                        return;
+                    }
+                }
+
+                // qol mobile: quick swipe up from the bottom strip opens the chat keyboard
+                if (
+                    this.qol !== null &&
+                    this.qol.config.getBool('mobile.gestureChatSwipe') &&
+                    this.sy > 338 &&
+                    !this.startedInGame &&
+                    !this.startedInSide &&
+                    !this.startedInChat &&
+                    this.ny - this.sy <= -60 &&
+                    Math.abs(this.nx - this.sx) < 40 &&
+                    e.timeStamp - this.ttime < 350
+                ) {
+                    MobileKeyboard.show(256, 447);
+                    return;
+                }
+
+                // qol mobile: double-tap in the game area recenters the camera on the
+                // player (clears the macro-camera drift; the orbit lerps back)
+                const now: number = performance.now();
+                if (
+                    this.qol !== null &&
+                    this.qol.config.getBool('mobile.gestureDoubleTap') &&
+                    this.startedInGame &&
+                    this.lastTapInGame &&
+                    now - this.lastTapTime < 300
+                ) {
+                    this.macroCameraX = 0;
+                    this.macroCameraZ = 0;
+                }
+                this.lastTapTime = now;
+                this.lastTapInGame = this.startedInGame;
+
                 if (!MobileKeyboard.isDisplayed() && this.insideMobileInput()) {
                     // show keyboard when tapping in an input area
                     MobileKeyboard.show(x, y, e.clientX, e.clientY);
@@ -14565,6 +14696,20 @@ export class Client extends GameShell {
             this.keyHeld[2] = 0;
             this.keyHeld[3] = 0;
             this.keyHeld[4] = 0;
+
+            // qol mobile: a finger leaving the canvas kills the two-finger tap
+            // and any in-flight panel drag
+            if (this.touchPointers.delete(e.pointerId) && this.touchPointers.size === 0) {
+                this.twoFinger = false;
+                this.twoFingerMoved = false;
+            }
+            if (this.touchPanel) {
+                const panel: any = this.qol !== null ? this.qol.panel : null;
+                if (panel !== null) {
+                    panel.touchEnd();
+                }
+                this.touchPanel = false;
+            }
         }
     }
 
@@ -14581,6 +14726,29 @@ export class Client extends GameShell {
 
             this.nx = e.screenX | 0;
             this.ny = e.screenY | 0;
+
+            // qol mobile: two fingers down — the browser owns the motion
+            // (touch-action: pinch-zoom); just track whether it became a pinch
+            if (this.twoFinger) {
+                const entry: { x: number; y: number; t: number } | undefined = this.touchPointers.get(e.pointerId);
+                if (entry !== undefined && (Math.abs(x - entry.x) > 25 || Math.abs(y - entry.y) > 25)) {
+                    this.twoFingerMoved = true;
+                }
+                this.mx = this.nx;
+                this.my = this.ny;
+                return;
+            }
+
+            // qol mobile: the open settings panel owns touches that start in it
+            if (this.touchPanel) {
+                const panel: any = this.qol !== null ? this.qol.panel : null;
+                if (panel !== null) {
+                    panel.touchMove(x, y);
+                }
+                this.mx = this.nx;
+                this.my = this.ny;
+                return;
+            }
 
             if (this.dragging) {
                 // no-op
